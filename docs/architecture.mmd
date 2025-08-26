@@ -1,0 +1,20 @@
+graph TD
+  A["Mobile App (React Native/Expo)"]
+  B["Express API (Node.js)"]
+  C["PostgreSQL DB"]
+  D["Socket.io (Realtime)"]
+  E["Firebase Admin (FCM)"]
+  F["Expo Push Service"]
+
+  A -- "REST (fetch)" --> B
+  A <-- "WebSocket" --> D
+  D --- B
+  B -- "SQL (pg)" --> C
+  B -- "Push notifications" --> E
+  B -- "Fallback push" --> F
+  A -- "Background Location (Expo)" --> B
+
+
+
+
+

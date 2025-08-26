@@ -1,0 +1,122 @@
+{
+  "expo": {
+    "name": "Future Soldier",
+    "slug": "My",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/2.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "owner": "vikram1025",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.vikram662.My",
+      "config": {
+        "googleMapsApiKey": "AIzaSyA7bktzJhEmCzRss6LFIwCtAp89RQCWErE"
+      },
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSLocationWhenInUseUsageDescription": "This app uses your location to show your position on the map.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app uses your location to track you in the background.",
+        "UIBackgroundModes": [
+          "location",
+          "background-processing",
+          "background-fetch",
+          "remote-notification"
+        ],
+        "BGTaskSchedulerPermittedIdentifiers": [
+          "com.vikram.myapp.background-location-task"
+        ],
+        "NSCameraUsageDescription": "This app uses the camera to take profile photos.",
+        "NSPhotoLibraryUsageDescription": "This app accesses your photo library to select profile photos."
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/2.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "com.vikram662.My",
+      "usesCleartextTraffic": true,
+      "googleServicesFile": "./google-services.json",
+      "permissions": [
+        "INTERNET",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "POST_NOTIFICATIONS",
+        "WAKE_LOCK",
+        "VIBRATE",
+        "RECEIVE_BOOT_COMPLETED",
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
+      ],
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyA7bktzJhEmCzRss6LFIwCtAp89RQCWErE"
+        }
+      },
+      "foregroundServiceType": ["location"],
+      "notification": {
+        "icon": "./assets/2.png",
+        "color": "#10B981",
+        "androidCollapsedTitle": "Future Soldiers",
+        "androidChannelId": "default"
+      },
+      "manifest": {
+        "xmlns:tools": "http://schemas.android.com/tools",
+        "application": {
+          "meta-data": [
+            {
+              "name": "com.google.firebase.messaging.default_notification_color",
+              "value": "#10B981",
+              "tools:replace": "android:resource"
+            }
+          ]
+        }
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "906dc6f9-b8ef-4b03-91c1-3aeaeeed2c78"
+      }
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow $(PRODUCT_NAME) to use your location in the background for tracking purposes.",
+          "locationAlwaysPermission": "Allow $(PRODUCT_NAME) to use your location in the background for tracking purposes.",
+          "locationWhenInUsePermission": "Allow $(PRODUCT_NAME) to use your location."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/2.png",
+          "color": "#10B981",
+          "mode": "production",
+          "androidMode": "default"
+        }
+      ]
+    ]
+
+  }
+}
