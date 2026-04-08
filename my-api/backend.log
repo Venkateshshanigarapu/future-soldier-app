@@ -1,0 +1,28 @@
+[dotenv@17.2.0] injecting env (0) from .env (tip: ⚙️  write to custom object with { processEnv: myObject })
+NODE_ENV: undefined
+DATABASE_URL: NOT FOUND
+PG Config → {
+  host: 'localhost',
+  database: 'OCFA',
+  user: 'postgres',
+  port: 5432,
+  ssl: 'disabled'
+}
+✅ Firebase Admin SDK initialized successfully
+/home/fss/Desktop/ATMS/FutureSoldiersapk/my-api/routes/zones.js:284
+  });
+  ^
+
+SyntaxError: Missing catch or finally after try
+    at internalCompileFunction (node:internal/vm:73:18)
+    at wrapSafe (node:internal/modules/cjs/loader:1274:20)
+    at Module._compile (node:internal/modules/cjs/loader:1320:27)
+    at Module._extensions..js (node:internal/modules/cjs/loader:1414:10)
+    at Module.load (node:internal/modules/cjs/loader:1197:32)
+    at Module._load (node:internal/modules/cjs/loader:1013:12)
+    at Module.require (node:internal/modules/cjs/loader:1225:19)
+    at require (node:internal/modules/helpers:177:18)
+    at Object.<anonymous> (/home/fss/Desktop/ATMS/FutureSoldiersapk/my-api/index.js:12:21)
+    at Module._compile (node:internal/modules/cjs/loader:1356:14)
+
+Node.js v18.19.1

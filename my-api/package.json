@@ -1,0 +1,21 @@
+{
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "better-sqlite3": "^12.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.0.1",
+    "expo": "^54.0.12",
+    "express": "^5.1.0",
+    "firebase-admin": "^12.7.0",
+    "nat-upnp": "^1.1.1",
+    "pg": "^8.16.3",
+    "socket.io": "^4.8.1",
+    "sqlite3": "^5.1.7",
+    "uuid": "^11.1.0"
+  }
+}
