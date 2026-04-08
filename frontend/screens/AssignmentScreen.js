@@ -1,4 +1,4 @@
-import React, { useState, useLayoutEffect, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useLayoutEffect, useEffect, useCallback, useRef, useMemo } from 'react';
 import { 
   View, 
   Text, 
@@ -21,6 +21,7 @@ import { socket } from '../services/api';
 import AssignmentItem from '../components/AssignmentItem';
 import EmptyState from '../components/EmptyState';
 import FilterChip from '../components/FilterChip';
+import i18n, { addLanguageChangeListener } from '../utils/i18n';
 
 const { width, height } = Dimensions.get('window');
 
@@ -32,9 +33,11 @@ export default function AssignmentScreen({ navigation }) {
   const [refreshing, setRefreshing] = useState(false);
   const [userRole, setUserRole] = useState('');
   const [userId, setUserId] = useState('');
+  const [unitId, setUnitId] = useState(null);
   const [filter, setFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
+  const [currentLanguage, setCurrentLanguage] = useState(i18n.locale);
   
   // Animation values
   const headerAnim = useRef(new Animated.Value(0)).current;
@@ -70,6 +73,30 @@ export default function AssignmentScreen({ navigation }) {
     extrapolate: 'clamp',
   });
 
+  useEffect(() => {
+    const unsubscribe = addLanguageChangeListener(() => {
+      setCurrentLanguage(i18n.locale);
+    });
+    return unsubscribe;
+  }, []);
+
+  const getStatusLabel = (status) => {
+    switch ((status || '').toLowerCase()) {
+      case 'pending':
+        return i18n.t('pending');
+      case 'in_progress':
+      case 'in-progress':
+      case 'in progress':
+        return i18n.t('inProgress');
+      case 'completed':
+        return i18n.t('completed');
+      case 'cancelled':
+        return i18n.t('cancelled');
+      default:
+        return status;
+    }
+  };
+
   // Load user data on mount
   useEffect(() => {
     const loadUserData = async () => {
@@ -79,6 +106,16 @@ export default function AssignmentScreen({ navigation }) {
           const user = JSON.parse(userData);
           setUserRole(user.role);
           setUserId(user.id || user.serviceId);
+          // Use the unit field directly (string value like "Unit 1", "Alpha", etc.)
+          // This matches the unit_id field in assignments table
+          const userUnit = user.unit || user.unitId || user.unit_name || null;
+          setUnitId(userUnit);
+          console.log('[AssignmentScreen] Loaded user data:', {
+            role: user.role,
+            userId: user.id || user.serviceId,
+            unit: userUnit,
+            fullUser: user
+          });
         }
       } catch (error) {
         console.error('Error loading user data:', error);
@@ -92,28 +129,60 @@ export default function AssignmentScreen({ navigation }) {
   const loadAssignments = useCallback(async () => {
     try {
       setLoading(true);
-      const options = {};
       
-      // Fetch ALL assignments (no user filter)
-      const [assignmentsData, statsData] = await Promise.all([
-        assignmentService.getAssignments(options),
-        assignmentService.getAssignmentStats(null)
-      ]);
+      // Always require unitId (unit name) - security: never fetch all assignments
+      if (!unitId) {
+        console.warn('[AssignmentScreen] No unit available, cannot load assignments');
+        console.warn('[AssignmentScreen] User data:', { userRole, userId, unitId });
+        setAssignments([]);
+        setStats({});
+        setLoading(false);
+        return;
+      }
+
+      // Filter assignments by unit_id only (no filtering by assignee)
+      // Backend will handle unit name to unit_id lookup if unitId is a string
+      const options = { unitId };
+      console.log('[AssignmentScreen] Loading assignments for unit:', unitId);
       
-      setAssignments(assignmentsData);
-      setStats(statsData);
+      const assignmentsData = await assignmentService.getAssignments(options);
+      const statsData = await assignmentService.getAssignmentStats({ unitId });
+      
+      setAssignments(assignmentsData || []);
+      setStats(statsData || {});
     } catch (error) {
       console.error('Error loading assignments:', error);
-      Alert.alert('Error', 'Failed to load assignments');
+      if (error.message?.includes('403') || error.message?.includes('unitId required')) {
+        Alert.alert(i18n.t('permissionDenied'), i18n.t('unitIdRequired'));
+      } else {
+        Alert.alert(i18n.t('error'), i18n.t('failedToLoadAssignments'));
+      }
+      setAssignments([]);
+      setStats({});
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [userId, unitId, userRole]);
 
-  // Load assignments on mount
+  // Load assignments on mount and when user info changes
+  // Only load if we have unitId (prevent warning on initial mount)
   useEffect(() => {
-    loadAssignments();
-  }, [loadAssignments]);
+    if (unitId) {
+      loadAssignments();
+    }
+  }, [loadAssignments, unitId]);
+
+  // Join socket room for unit-specific assignment updates
+  useEffect(() => {
+    if (unitId && socket) {
+      try {
+        socket.emit('joinUnit', { unitId });
+        console.log(`[AssignmentScreen] Joined socket room for unit: ${unitId}`);
+      } catch (e) {
+        console.error('[AssignmentScreen] Error joining unit room:', e);
+      }
+    }
+  }, [unitId]);
 
   // Realtime updates: listen for create/update/delete and refresh
   useEffect(() => {
@@ -170,6 +239,14 @@ export default function AssignmentScreen({ navigation }) {
     setFilteredAssignments(filtered);
   }, [assignments, filter, searchQuery]);
 
+  const filterOptions = useMemo(() => ([
+    { type: 'all', label: i18n.t('all'), icon: 'apps' },
+    { type: 'pending', label: i18n.t('pending'), icon: 'time' },
+    { type: 'in_progress', label: i18n.t('inProgress'), icon: 'play' },
+    { type: 'completed', label: i18n.t('completed'), icon: 'checkmark-circle' },
+    { type: 'cancelled', label: i18n.t('cancelled'), icon: 'close-circle' }
+  ]), [currentLanguage]);
+
   // Animate search bar visibility
   useEffect(() => {
     Animated.timing(searchAnim, {
@@ -218,21 +295,22 @@ export default function AssignmentScreen({ navigation }) {
     const statusOptions = ['pending', 'in_progress', 'completed', 'cancelled'];
     const currentIndex = statusOptions.indexOf(assignment.status);
     const nextStatus = statusOptions[(currentIndex + 1) % statusOptions.length];
+    const nextStatusLabel = getStatusLabel(nextStatus);
     
     Alert.alert(
-      'Update Status',
-      `Change status to "${nextStatus.replace('_', ' ')}"?`,
+      i18n.t('updateStatus'),
+      i18n.t('changeStatusConfirm', { status: nextStatusLabel }),
       [
-        { text: 'Cancel', style: 'cancel' },
+        { text: i18n.t('cancel'), style: 'cancel' },
         {
-          text: 'Update',
+          text: i18n.t('update'),
           onPress: async () => {
             try {
               await assignmentService.updateAssignmentStatus(assignment.id, nextStatus);
               await loadAssignments(); // Reload to get updated data
             } catch (error) {
               console.error('Error updating status:', error);
-              Alert.alert('Error', 'Failed to update status');
+              Alert.alert(i18n.t('error'), i18n.t('failedToUpdateStatus'));
             }
           }
         }
@@ -308,15 +386,15 @@ export default function AssignmentScreen({ navigation }) {
           { paddingTop: headerPaddingTop, paddingBottom: headerPaddingBottom }
         ]}>
           <View style={styles.headerLeft}>
-            <Animated.View style={[styles.headerIconContainer, { transform: [{ scale: iconScale }] }]}>
-              <Icon name="list" size={24} color="#10B981" />
+            <Animated.View style={[styles.headerIconContainer, { transform: [{ scale: iconScale }] }]}> 
+              <Icon name="clipboard" size={24} color="#10B981" />
             </Animated.View>
             <View style={styles.headerTextContainer}>
               <Animated.Text style={[styles.headerSubtitle, { transform: [{ translateY: titleTranslateY }] }]}>
-                Assignments
+                {i18n.t('assignmentsTitle')}
               </Animated.Text>
               <Animated.Text style={[styles.headerCount, { opacity: countOpacity }]}>
-                {filteredAssignments.length} {filteredAssignments.length === 1 ? 'assignment' : 'assignments'}
+                {i18n.t(filteredAssignments.length === 1 ? 'assignmentCountSingular' : 'assignmentCountPlural', { count: filteredAssignments.length })}
               </Animated.Text>
             </View>
           </View>
@@ -341,7 +419,7 @@ export default function AssignmentScreen({ navigation }) {
             <Icon name="search" size={20} color="#6B7280" style={styles.searchIcon} />
             <TextInput
               style={styles.searchInput}
-              placeholder="Search assignments"
+              placeholder={i18n.t('searchAssignments')}
               value={searchQuery}
               onChangeText={setSearchQuery}
               placeholderTextColor="#9CA3AF"
@@ -354,35 +432,6 @@ export default function AssignmentScreen({ navigation }) {
           </View>
         </Animated.View>
       )}
-      
-      {/* Statistics Cards */}
-      <Animated.View 
-        style={[
-          styles.statsContainer,
-          {
-            transform: [{ translateY: statsAnim.interpolate({
-              inputRange: [0, 1],
-              outputRange: [-30, 0]
-            })}],
-            opacity: statsAnim
-          }
-        ]}
-      >
-        <FlatList
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          data={[
-            { title: 'Total', value: stats.total || 0, color: '#3B82F6', icon: 'list' },
-            { title: 'Pending', value: stats.pending || 0, color: '#F59E0B', icon: 'time' },
-            { title: 'In Progress', value: stats.in_progress || 0, color: '#3B82F6', icon: 'play' },
-            { title: 'Completed', value: stats.completed || 0, color: '#10B981', icon: 'checkmark-circle' },
-            { title: 'Overdue', value: stats.overdue || 0, color: '#EF4444', icon: 'warning' },
-          ]}
-          renderItem={({ item }) => renderStatsCard(item.title, item.value, item.color, item.icon)}
-          keyExtractor={item => item.title}
-          contentContainerStyle={styles.statsList}
-        />
-      </Animated.View>
       
       {/* Filter Section */}
       <Animated.View 
@@ -398,7 +447,7 @@ export default function AssignmentScreen({ navigation }) {
         ]}
       >
         <View style={styles.filterHeader}>
-          <Text style={styles.filterTitle}>Filter by Status</Text>
+          <Text style={styles.filterTitle}>{i18n.t('filterByStatus')}</Text>
           <View style={styles.filterCount}>
             <Text style={styles.filterCountText}>{filteredAssignments.length}</Text>
           </View>
@@ -406,13 +455,7 @@ export default function AssignmentScreen({ navigation }) {
         <FlatList
           horizontal
           showsHorizontalScrollIndicator={false}
-          data={[
-            { type: 'all', label: 'All', icon: 'apps' },
-            { type: 'pending', label: 'Pending', icon: 'time' },
-            { type: 'in_progress', label: 'In Progress', icon: 'play' },
-            { type: 'completed', label: 'Completed', icon: 'checkmark-circle' },
-            { type: 'cancelled', label: 'Cancelled', icon: 'close-circle' }
-          ]}
+          data={filterOptions}
           renderItem={({ item }) => renderFilterChip(item.type, item.label, item.icon)}
           keyExtractor={item => item.type}
           contentContainerStyle={styles.filterList}
@@ -442,8 +485,8 @@ export default function AssignmentScreen({ navigation }) {
         ListEmptyComponent={
           <EmptyState
             icon="list"
-            title="No Assignments Found"
-            subtitle={searchQuery ? "Try adjusting your search or filters" : "You're all caught up! New assignments will appear here."}
+            title={i18n.t('noAssignmentsFound')}
+            subtitle={searchQuery ? i18n.t('adjustSearchOrFilters') : i18n.t('allCaughtUp')}
             iconColor="#D1D5DB"
           />
         }

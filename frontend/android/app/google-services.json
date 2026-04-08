@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "108342925328",
+    "project_id": "future-soldiers",
+    "storage_bucket": "future-soldiers.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:108342925328:android:f95636b08c04eaf8db9295",
+        "android_client_info": {
+          "package_name": "com.vikram662.My"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCwMNO1MhvHU3TumiYOUGWFK6mnIgHxTf8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

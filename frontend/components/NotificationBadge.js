@@ -91,7 +91,7 @@ const styles = StyleSheet.create({
       position: 'absolute',
       top: -4,
       right: -4,
-      backgroundColor: '#10B981',
+      backgroundColor: '#F44336',
       borderRadius: 10,
       justifyContent: 'center',
       alignItems: 'center',

@@ -1,12 +1,12 @@
 {
   "expo": {
     "name": "Future Soldier",
-    "slug": "My",
+    "slug": "Futuresoldiers",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/2.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "platforms": [
       "ios",
       "android",
@@ -17,7 +17,7 @@
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
-    "owner": "vikram1025",
+    "owner": "gowthambantu",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.vikram662.My",
@@ -38,7 +38,18 @@
           "com.vikram.myapp.background-location-task"
         ],
         "NSCameraUsageDescription": "This app uses the camera to take profile photos.",
-        "NSPhotoLibraryUsageDescription": "This app accesses your photo library to select profile photos."
+        "NSPhotoLibraryUsageDescription": "This app accesses your photo library to select profile photos.",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
+          "NSExceptionDomains": {
+            "117.251.19.107": {
+              "NSExceptionAllowsInsecureHTTPLoads": true
+            },
+            "ocfa.onrender.com": {
+              "NSExceptionAllowsInsecureHTTPLoads": true
+            }
+          }
+        }
       }
     },
     "android": {
@@ -63,14 +74,22 @@
         "RECEIVE_BOOT_COMPLETED",
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE"
+        "WRITE_EXTERNAL_STORAGE",
+        "SYSTEM_ALERT_WINDOW",
+        "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
       "config": {
         "googleMaps": {
           "apiKey": "AIzaSyA7bktzJhEmCzRss6LFIwCtAp89RQCWErE"
         }
       },
-      "foregroundServiceType": ["location"],
+      "foregroundServiceType": [
+        "location"
+      ],
       "notification": {
         "icon": "./assets/2.png",
         "color": "#10B981",
@@ -93,11 +112,10 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "extra": {
-      "eas": {
-        "projectId": "906dc6f9-b8ef-4b03-91c1-3aeaeeed2c78"
-      }
-    },
+    "assetBundlePatterns": [
+      "**/*",
+      "./assets/sounds/*"
+    ],
     "plugins": [
       [
         "expo-location",
@@ -115,8 +133,18 @@
           "mode": "production",
           "androidMode": "default"
         }
+      ],
+      [
+        "expo-av",
+        {
+          "microphonePermission": "Allow Future Soldiers to access your microphone."
+        }
       ]
-    ]
-
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "f8f3f35b-8f87-4852-ac57-96f161ed1c0c"
+      }
+    }
   }
 }

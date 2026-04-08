@@ -9,6 +9,7 @@ const MenuIcon = ({ toggleDropdown, dropdownVisible, setDropdownVisible }) => {
   const navigation = useNavigation();  // Use the useNavigation hook to access navigation
   const [userRole, setUserRole] = useState('');
   const [userName, setUserName] = useState('');
+  const [logoutVisible, setLogoutVisible] = useState(false);
 
   // Load user data from AsyncStorage
   useEffect(() => {
@@ -28,20 +29,11 @@ const MenuIcon = ({ toggleDropdown, dropdownVisible, setDropdownVisible }) => {
     loadUserData();
   }, []);
 
-  const handleLogout = async () => {
+  const confirmAndLogout = async () => {
     try {
-      // Clear user data
+      setLogoutVisible(false);
       await AsyncStorage.removeItem('currentUser');
-      
-      console.log("Logout clicked");
-
-      // Reset navigation stack and navigate to the Login screen
-      navigation.reset({
-        index: 0,
-        routes: [{ name: 'Login' }],  // Ensure you have a "Login" screen in your navigator
-      });
-
-      // Close the dropdown after logout
+      navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
       setDropdownVisible(false);
     } catch (error) {
       console.error('Error during logout:', error);
@@ -50,15 +42,7 @@ const MenuIcon = ({ toggleDropdown, dropdownVisible, setDropdownVisible }) => {
 
   return (
     <View style={styles.container}>
-      {/* Notification Icon */}
-      <TouchableOpacity
-        style={styles.iconButton}
-        onPress={() => navigation.navigate('Notifications')}
-      >
-        <Icon name="notifications" size={24} color="#fff" />
-      </TouchableOpacity>
-
-      {/* Menu Icon */}
+      {/* Menu Icon only (remove duplicate bell) */}
       <TouchableOpacity
         style={styles.iconButton}
         onPress={() => toggleDropdown()}
@@ -129,7 +113,7 @@ const MenuIcon = ({ toggleDropdown, dropdownVisible, setDropdownVisible }) => {
           {/* Logout button */}
           <TouchableOpacity
             style={[styles.menuItem, styles.logoutItem]}
-            onPress={handleLogout}
+            onPress={() => setLogoutVisible(true)}
           >
             <Icon name="log-out" size={20} color="#F44336" style={styles.menuIcon} />
             <Text style={styles.logoutText}>Logout</Text>
@@ -141,6 +125,23 @@ const MenuIcon = ({ toggleDropdown, dropdownVisible, setDropdownVisible }) => {
           </Pressable>
         </Modal>
       )}
+      {/* Logout confirm modal */}
+      <Modal visible={logoutVisible} transparent animationType="fade" onRequestClose={() => setLogoutVisible(false)}>
+        <View style={styles.logoutBackdrop}>
+          <View style={styles.logoutCard}>
+            <Text style={styles.logoutTitle}>Logout</Text>
+            <Text style={styles.logoutSubtitle}>Are you sure you want to logout?</Text>
+            <View style={styles.logoutActions}>
+              <TouchableOpacity style={[styles.logoutBtn, styles.logoutCancel]} onPress={() => setLogoutVisible(false)}>
+                <Text style={styles.logoutCancelText}>CANCEL</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.logoutBtn, styles.logoutConfirm]} onPress={confirmAndLogout}>
+                <Text style={styles.logoutConfirmText}>LOGOUT</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 };

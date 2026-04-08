@@ -4,9 +4,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import Icon from 'react-native-vector-icons/Ionicons';
 import * as Notifications from 'expo-notifications';
 import { apiService } from '../services/api';
-import * as Location from 'expo-location';
-import { startBackgroundLocation, updateCachedUserData } from '../services/backgroundLocationService';
-import i18n from '../utils/i18n';
+import i18n, { addLanguageChangeListener } from '../utils/i18n';
+import { useFocusEffect } from '@react-navigation/native';
 
 const { width, height } = Dimensions.get('window');
 
@@ -30,6 +29,15 @@ export default function LoginScreen({ navigation }) {
   const [loading, setLoading] = useState(false);
   const [secureTextEntry, setSecureTextEntry] = useState(true);
   const isDatabaseLinked = true; // Always use backend
+  const [currentLanguage, setCurrentLanguage] = useState(i18n.locale);
+
+  // Listen for language changes to force re-render
+  useEffect(() => {
+    const unsubscribe = addLanguageChangeListener(() => {
+      setCurrentLanguage(i18n.locale);
+    });
+    return unsubscribe;
+  }, []);
 
   // CAPTCHA state
   const [captcha, setCaptcha] = useState('');
@@ -50,6 +58,18 @@ export default function LoginScreen({ navigation }) {
     generateCaptcha();
   }, []);
 
+  // Reset UI cleanly every time we arrive on Login (after logout, back, etc.)
+  useFocusEffect(
+    React.useCallback(() => {
+      setServiceId('');
+      setPassword('');
+      setSecureTextEntry(true);
+      setLoading(false);
+      generateCaptcha();
+      return () => { };
+    }, [])
+  );
+
   const handleLogin = async () => {
     if (serviceId && password) {
       // CAPTCHA validation
@@ -68,73 +88,38 @@ export default function LoginScreen({ navigation }) {
         await AsyncStorage.setItem('currentUser', JSON.stringify(user));
         setLoading(false);
         showRoleToast(user.role); // Show toast based on user role
-        
-        // After login, capture and update location
-        console.log('[LOGIN] Now attempting to update location...');
-        try {
-          console.log('[LOGIN] Requesting location permission...');
-          let { status } = await Location.requestForegroundPermissionsAsync();
-          console.log(`[LOGIN] Location permission status: ${status}`);
-          
-          if (status !== 'granted') {
-            Alert.alert('Permission Denied', 'Location permission was denied. Cannot update location.');
-            console.error('[LOGIN] Location permission denied.');
-            navigation.navigate('MainApp');
-            return;
-          }
 
-          console.log('[LOGIN] Getting current position...');
-          const loc = await Location.getCurrentPositionAsync({});
-          console.log('[LOGIN] Got location:', JSON.stringify(loc.coords));
-
-          const latitude = loc.coords.latitude;
-          const longitude = loc.coords.longitude;
-          const heading = (typeof loc.coords.heading === 'number' && !isNaN(loc.coords.heading)) ? loc.coords.heading : 0;
-
-          if (!user || !user.id) {
-              console.error('[LOGIN] Cannot update location: User Login ID is missing from login response.');
-              Alert.alert('Error', 'Could not update location: User Login ID is missing.');
-          } else {
-              console.log(`[LOGIN] Sending location update for userId: ${user.id}`);
-              await apiService.updateUserLocation(user.id, latitude, longitude, heading);
-              console.log('[LOGIN] Location update API call successful.');
-          }
-
-        } catch (err) {
-          Alert.alert('Location Error', 'Could not fetch or update location after login.');
-          console.error('[LOGIN] An error occurred during location update:', err);
-        }
-
-        // Start background location tracking after successful login
-        try {
-          console.log('[LOGIN] Starting background location tracking...');
-          await updateCachedUserData();
-          const success = await startBackgroundLocation();
-          if (success) {
-            console.log('[LOGIN] Background location tracking started successfully');
-          } else {
-            console.warn('[LOGIN] Failed to start background location tracking');
-          }
-        } catch (error) {
-          console.error('[LOGIN] Error starting background location:', error);
-        }
+        // No GPS capture on login - location will be fetched from database
+        console.log('[LOGIN] User logged in. Location will be loaded from database.');
 
         navigation.navigate('MainApp');
       } catch (error) {
         setLoading(false);
-        Alert.alert('Error', 'Invalid credentials or server error');
         console.error('[LOGIN] An error occurred during login:', error);
+
+        // Handle specific error cases
+        if (error.message && error.message.includes('pending approval')) {
+          Alert.alert(
+            'Registration Pending',
+            'Your registration is pending approval. Please wait for an administrator to approve your account.',
+            [{ text: 'OK' }]
+          );
+        } else if (error.message && error.message.includes('Invalid credentials')) {
+          Alert.alert('Login Failed', 'Invalid username or password. Please check your credentials and try again.');
+        } else {
+          Alert.alert('Error', 'Login failed. Please check your connection and try again.');
+        }
       }
     } else {
       Alert.alert('Error', 'Please enter your User Login ID and password');
     }
   };
-  
+
   return (
     <View style={styles.rootContainer}>
-      <StatusBar 
-        barStyle="dark-content" 
-        backgroundColor="#ffffff" 
+      <StatusBar
+        barStyle="dark-content"
+        backgroundColor="#ffffff"
         translucent={false}
       />
       <SafeAreaView style={styles.safeArea}>
@@ -161,7 +146,7 @@ export default function LoginScreen({ navigation }) {
               <View style={styles.headerSection}>
                 <Text style={styles.headerText}>Military Asset Tracker</Text>
                 <View style={styles.logoWrapper}>
-                  <Image 
+                  <Image
                     source={require('../assets/3.jpg')}
                     style={styles.logo}
                     resizeMode="contain"
@@ -212,10 +197,10 @@ export default function LoginScreen({ navigation }) {
                       onPress={() => setSecureTextEntry(!secureTextEntry)}
                       activeOpacity={0.7}
                     >
-                      <Icon 
-                        name={secureTextEntry ? 'eye-outline' : 'eye-off-outline'} 
-                        size={22} 
-                        color="#2E3192" 
+                      <Icon
+                        name={secureTextEntry ? 'eye-outline' : 'eye-off-outline'}
+                        size={22}
+                        color="#2E3192"
                       />
                     </TouchableOpacity>
                   </View>
@@ -238,8 +223,8 @@ export default function LoginScreen({ navigation }) {
                       maxLength={5}
                       selectionColor="#2A6F2B"
                     />
-                    <TouchableOpacity 
-                      onPress={generateCaptcha} 
+                    <TouchableOpacity
+                      onPress={generateCaptcha}
                       style={styles.refreshButton}
                       activeOpacity={0.7}
                     >
@@ -253,7 +238,7 @@ export default function LoginScreen({ navigation }) {
                   style={[
                     styles.loginButton,
                     loading && styles.loginButtonDisabled
-                  ]} 
+                  ]}
                   onPress={handleLogin}
                   disabled={loading}
                   activeOpacity={0.8}
@@ -276,7 +261,7 @@ export default function LoginScreen({ navigation }) {
                   </Text>
                 </TouchableOpacity>
 
-                <TouchableOpacity 
+                <TouchableOpacity
                   style={styles.forgotLink}
                   onPress={() => navigation.navigate('PasswordRecovery')}
                   activeOpacity={0.7}
@@ -284,18 +269,26 @@ export default function LoginScreen({ navigation }) {
                   <Text style={styles.forgotLinkText}>Forgot Password?</Text>
                 </TouchableOpacity>
               </View>
-              
+
               {/* Security Notice */}
               <View style={styles.securityNotice}>
                 <Icon name="shield-checkmark" size={16} color="#666" />
                 <Text style={styles.securityText}>
-                  This is a secure military application. All activities are logged and monitored.
+                  VERSION 1.0
                 </Text>
               </View>
             </View>
           </ScrollView>
         </KeyboardAvoidingView>
       </SafeAreaView>
+      {loading && (
+        <View style={styles.loadingOverlay} pointerEvents="none">
+          <View style={styles.loadingCard}>
+            <ActivityIndicator size="small" color="#2E3192" />
+            <Text style={styles.loadingText}>Signing in...</Text>
+          </View>
+        </View>
+      )}
     </View>
   );
 }
@@ -595,6 +588,36 @@ const styles = StyleSheet.create({
     fontSize: Math.min(width * 0.032, 13),
     textAlign: 'center',
     flex: 1,
+  },
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: '#eee',
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  loadingText: {
+    marginLeft: 10,
+    color: '#2E3192',
+    fontWeight: '600',
   },
   cardContainer: {
     width: '100%',

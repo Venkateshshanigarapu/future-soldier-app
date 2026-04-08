@@ -32,10 +32,15 @@ class AssignmentService {
   /**
    * Get all assignments with optional filtering
    */
-  async getAssignments(options = {}) {
+  async getAssignments({ unitId, userId, ...rest } = {}) {
     try {
+      // Security: unitId is required - never fetch all assignments
+      if (!unitId) {
+        console.warn('[AssignmentService] unitId is required, returning empty array');
+        return [];
+      }
+
       const {
-        userId,
         status,
         priority,
         assignedBy,
@@ -43,10 +48,12 @@ class AssignmentService {
         offset = 0,
         sortBy = 'created_at',
         sortOrder = 'DESC'
-      } = options;
+      } = rest;
 
       const queryParams = new URLSearchParams();
       
+      // unitId is required and must be first
+      queryParams.append('unitId', unitId);
       if (userId) queryParams.append('userId', userId);
       if (status) queryParams.append('status', status);
       if (priority) queryParams.append('priority', priority);
@@ -182,9 +189,16 @@ class AssignmentService {
   /**
    * Get assignment statistics
    */
-  async getAssignmentStats(userId = null) {
+  async getAssignmentStats({ unitId, userId } = {}) {
     try {
+      // Security: unitId is required - never fetch all stats
+      if (!unitId) {
+        console.warn('[AssignmentService] unitId is required for stats, returning empty stats');
+        return { total: 0, pending: 0, in_progress: 0, completed: 0, cancelled: 0 };
+      }
+
       const queryParams = new URLSearchParams();
+      queryParams.append('unitId', unitId);
       if (userId) queryParams.append('userId', userId);
 
       return await fetchWithFallback(`/assignments/stats/overview?${queryParams}`);

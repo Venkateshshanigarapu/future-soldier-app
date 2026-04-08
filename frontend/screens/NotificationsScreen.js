@@ -1,32 +1,36 @@
-import React, { useState, useLayoutEffect, useEffect, useCallback, useRef } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  FlatList, 
-  TouchableOpacity, 
-  Switch, 
-  Alert, 
+import React, { useState, useLayoutEffect, useEffect, useCallback, useRef, useMemo } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  FlatList,
+  TouchableOpacity,
+  Switch,
+  Alert,
   SafeAreaView,
   StatusBar,
   Animated,
   Dimensions,
   RefreshControl,
-  Platform
+  Platform,
+  Modal
 } from 'react-native';
 import Icon from 'react-native-vector-icons/Ionicons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MenuIcon from './MenuIcon';
 import { useNotifications } from '../NotificationContext';
 import { format, formatDistanceToNow } from 'date-fns';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
-import { 
-  sendLocalNotification, 
-  simulateFirebaseNotification, 
-  checkNotificationStatus 
+import {
+  sendLocalNotification,
+  simulateFirebaseNotification,
+  checkNotificationStatus
 } from '../sendTestNotification';
-import i18n from '../utils/i18n';
+import i18n, { addLanguageChangeListener } from '../utils/i18n';
 import NotificationItem from '../components/NotificationItem';
+import ZoneBreachNotification from '../components/ZoneBreachNotification';
+import ZoneBreachTestButton from '../components/ZoneBreachTestButton';
 import EmptyState from '../components/EmptyState';
 import FilterChip from '../components/FilterChip';
 // import { apiService } from '../services/api';
@@ -34,17 +38,37 @@ import FilterChip from '../components/FilterChip';
 const { width, height } = Dimensions.get('window');
 
 export default function NotificationsScreen({ navigation }) {
+  const insets = useSafeAreaInsets();
   const [dropdownVisible, setDropdownVisible] = useState(false);
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [settingsVisible, setSettingsVisible] = useState(false);
   const [filter, setFilter] = useState('all');
   const [userRole, setUserRole] = useState('');
   const [userId, setUserId] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [showTestSection, setShowTestSection] = useState(false);
+  const [currentLanguage, setCurrentLanguage] = useState(i18n.locale);
+
+  // Listen for language changes to force re-render
+  useEffect(() => {
+    const unsubscribe = addLanguageChangeListener(() => {
+      setCurrentLanguage(i18n.locale);
+    });
+    return unsubscribe;
+  }, []);
+  const [showZoneBreachSection, setShowZoneBreachSection] = useState(true);
+  const filterOptions = useMemo(() => ([
+    { type: 'all', label: i18n.t('all'), icon: 'apps' },
+    { type: 'unread', label: i18n.t('filterUnread'), icon: 'mail-unread' },
+    { type: 'zone_breach', label: i18n.t('filterZoneAlerts'), icon: 'location' },
+    { type: 'emergency', label: i18n.t('filterEmergency'), icon: 'warning' },
+    { type: 'warning', label: i18n.t('filterWarning'), icon: 'alert-circle' },
+    { type: 'info', label: i18n.t('filterInfo'), icon: 'information-circle' }
+  ]), [currentLanguage]);
   // Using notifications from context (already mapped from alerts by apiService)
   // const [alerts, setAlerts] = useState([]);
   // const [mergedItems, setMergedItems] = useState([]);
-  
+
   // Animation values
   const headerAnim = useRef(new Animated.Value(0)).current;
   const filterAnim = useRef(new Animated.Value(0)).current;
@@ -82,19 +106,22 @@ export default function NotificationsScreen({ navigation }) {
     outputRange: [0, -28],
     extrapolate: 'clamp',
   });
-  
-  const { 
-    notifications, 
-    markAsRead, 
-    markAllAsRead, 
+
+  const {
+    notifications,
+    markAsRead,
+    markAllAsRead,
     clearAll,
     clearRead,
+    deleteNotification,
     markFilteredAsRead,
     clearFilteredRead,
     clearFilteredAll,
-    refreshNotifications
+    refreshNotifications,
+    soundEnabled,
+    toggleSound
   } = useNotifications();
-  
+
   // Refresh notifications when screen is focused
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
@@ -102,7 +129,7 @@ export default function NotificationsScreen({ navigation }) {
     });
     return unsubscribe;
   }, [navigation, refreshNotifications]);
-  
+
   // Filtered notifications based on user role
   const [filteredNotifications, setFilteredNotifications] = useState([]);
 
@@ -114,25 +141,46 @@ export default function NotificationsScreen({ navigation }) {
         if (userData) {
           const user = JSON.parse(userData);
           setUserRole(user.role);
-          setUserId(user.serviceId);
+          setUserId(user.id); // Use numeric ID for database consistency
         }
       } catch (error) {
         console.error('Error loading user role:', error);
       }
     };
-    
+
     loadUserData();
   }, []);
-  
+
+  // Load persisted preference
+  useEffect(() => {
+    (async () => {
+      try {
+        const stored = await AsyncStorage.getItem('notifications_enabled');
+        if (stored !== null) setNotificationsEnabled(stored === 'true');
+      } catch { }
+    })();
+  }, []);
+
+  // Persist preference on change
+  useEffect(() => {
+    (async () => {
+      try {
+        await AsyncStorage.setItem('notifications_enabled', notificationsEnabled ? 'true' : 'false');
+      } catch { }
+    })();
+  }, [notificationsEnabled]);
+
   // Filter notifications based on user role
   useEffect(() => {
     if (!notifications) return;
-    
+
     if (userRole === 'soldier') {
       setFilteredNotifications(
-        notifications.filter(notification => 
-          !notification.soldierId || notification.soldierId === userId
-        )
+        notifications.filter(notification => {
+          // If the notification has a userId, it must match the current user
+          // If it doesn't have one (though it should), we show it as a fallback
+          return !notification.userId || Number(notification.userId) === Number(userId);
+        })
       );
     } else {
       setFilteredNotifications(notifications);
@@ -185,19 +233,21 @@ export default function NotificationsScreen({ navigation }) {
   const diagnosePushNotifications = async () => {
     try {
       const status = await checkNotificationStatus();
-      
+
       Alert.alert(
         i18n.t('notificationDiagnosticTitle'),
-        `Permissions: ${status.permissionsGranted ? i18n.t('granted') : i18n.t('denied')}\n` +
-        `Stored Notifications: ${status.hasStoredNotifications ? i18n.t('yes') : i18n.t('no')}\n` +
-        `Push Token: ${status.hasPushToken ? i18n.t('available') : i18n.t('notAvailable')}\n` +
-        `Status: ${status.status || i18n.t('unknown')}`,
+        [
+          `${i18n.t('permissionStatus')}: ${status.permissionsGranted ? i18n.t('granted') : i18n.t('denied')}`,
+          `${i18n.t('storedNotifications')}: ${status.hasStoredNotifications ? i18n.t('yes') : i18n.t('no')}`,
+          `${i18n.t('pushToken')}: ${status.hasPushToken ? i18n.t('available') : i18n.t('notAvailable')}`,
+          `${i18n.t('status')}: ${status.status || i18n.t('unknown')}`
+        ].join('\n'),
         [
           {
             text: i18n.t('requestPermissions'),
             onPress: async () => {
               const { status } = await Notifications.requestPermissionsAsync();
-              Alert.alert(i18n.t('permissionStatus'), `New status: ${status}`);
+              Alert.alert(i18n.t('permissionStatus'), `${i18n.t('newStatus')}: ${status}`);
             }
           },
           {
@@ -215,16 +265,56 @@ export default function NotificationsScreen({ navigation }) {
     }
   };
 
-  // Apply type filter across items
-  const displayNotifications = (filteredNotifications || []).filter(item => {
-    if (filter === 'all') return true;
-    return item.type === filter;
-  });
+  // Separate zone breach and return notifications from regular notifications
+  const zoneBreachNotifications = (filteredNotifications || [])
+    .filter(item => item.type === 'zone_breach' || item.type === 'zone_return' || item.category === 'zone_breach' || item.category === 'zone_return')
+    .sort((a, b) => {
+      const timeA = new Date(a.timestamp || a.created_at || 0).getTime();
+      const timeB = new Date(b.timestamp || b.created_at || 0).getTime();
+      return timeB - timeA;
+    });
+
+  const regularNotifications = (filteredNotifications || [])
+    .filter(item => item.type !== 'zone_breach' && item.type !== 'zone_return' && item.category !== 'zone_breach' && item.category !== 'zone_return')
+    .filter(item => {
+      if (filter === 'all') return true;
+      if (filter === 'unread') return !item.read;
+      return item.type === filter;
+    })
+    .sort((a, b) => {
+      const timeA = new Date(a.timestamp || a.created_at || 0).getTime();
+      const timeB = new Date(b.timestamp || b.created_at || 0).getTime();
+      return timeB - timeA;
+    });
+
+  // Apply type filter across items and sort by newest first
+  const displayNotifications = (filteredNotifications || [])
+    .filter(item => {
+      if (filter === 'all') return true;
+      if (filter === 'unread') return !item.read;
+      return item.type === filter;
+    })
+    .sort((a, b) => {
+      // Sort by newest first (most recent timestamp first)
+      const timeA = new Date(a.timestamp || a.created_at || 0).getTime();
+      const timeB = new Date(b.timestamp || b.created_at || 0).getTime();
+      return timeB - timeA;
+    });
 
   const renderNotificationItem = ({ item, index }) => (
     <NotificationItem
       notification={item}
       onPress={(notification) => markAsRead(notification.id)}
+      onDelete={(id) => deleteNotification(id)}
+      index={index}
+    />
+  );
+
+  const renderZoneBreachItem = ({ item, index }) => (
+    <ZoneBreachNotification
+      notification={item}
+      onPress={(notification) => markAsRead(notification.id)}
+      onDelete={(id) => deleteNotification(id)}
       index={index}
     />
   );
@@ -240,22 +330,28 @@ export default function NotificationsScreen({ navigation }) {
 
   const getFilterCount = (filterType) => {
     if (filterType === 'all') return (filteredNotifications || []).length;
+    if (filterType === 'unread') return (filteredNotifications || []).filter(n => !n.read).length;
     return (filteredNotifications || []).filter(n => n.type === filterType).length;
   };
+
+  const headerCountValue = getFilterCount(filter);
+  const headerCountText = i18n.t(headerCountValue === 1 ? 'notificationCountSingular' : 'notificationCountPlural', { count: headerCountValue });
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-      
+
       {/* Premium Header */}
-      <Animated.View 
+      <Animated.View
         style={[
           styles.header,
           {
-            transform: [{ translateY: headerAnim.interpolate({
-              inputRange: [0, 1],
-              outputRange: [-50, 0]
-            })}],
+            transform: [{
+              translateY: headerAnim.interpolate({
+                inputRange: [0, 1],
+                outputRange: [-50, 0]
+              })
+            }],
             opacity: headerAnim,
             paddingTop: headerPaddingTop,
             paddingBottom: headerPaddingBottom,
@@ -265,161 +361,198 @@ export default function NotificationsScreen({ navigation }) {
       >
         <Animated.View style={styles.headerTop}>
           <View style={styles.headerLeft}>
-            <Animated.View style={[styles.headerIconContainer, { transform: [{ scale: iconScale }] }]}> 
+            <Animated.View style={[styles.headerIconContainer, { transform: [{ scale: iconScale }] }]}>
               <Icon name="notifications" size={24} color="#10B981" />
             </Animated.View>
             <View style={styles.headerTextContainer}>
-              <Animated.Text style={[styles.headerSubtitle, { transform: [{ translateY: titleTranslateY }] }]}>Notifications</Animated.Text>
+              <Animated.Text style={[styles.headerSubtitle, { transform: [{ translateY: titleTranslateY }] }]}>
+                {i18n.t('notifications')}
+              </Animated.Text>
               <Text style={styles.headerCount}>
-                {getFilterCount(filter)} {getFilterCount(filter) === 1 ? 'notification' : 'notifications'}
+                {headerCountText}
               </Text>
             </View>
           </View>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={styles.settingsButton}
-            onPress={() => setShowTestSection(!showTestSection)}
+            onPress={() => setSettingsVisible(true)}
             activeOpacity={0.7}
           >
             <Icon name="settings-outline" size={24} color="#6B7280" />
           </TouchableOpacity>
         </Animated.View>
-        
-        <View style={styles.headerControls}>
-          <View style={styles.toggleContainer}>
-            <View style={styles.toggleLabelContainer}>
-              <Icon name="notifications-circle" size={16} color="#10B981" style={styles.toggleIcon} />
-              <Text style={styles.toggleLabel}>Enable Notifications</Text>
-            </View>
-          <Switch
-            value={notificationsEnabled}
-            onValueChange={setNotificationsEnabled}
-              trackColor={{ false: '#E5E7EB', true: '#10B981' }}
-              thumbColor={notificationsEnabled ? '#FFFFFF' : '#FFFFFF'}
-              ios_backgroundColor="#E5E7EB"
-          />
-        </View>
-      </View>
+
+
       </Animated.View>
-      
+
       {/* Enhanced Filter Section */}
-      <Animated.View 
+      <Animated.View
         style={[
           styles.filterContainer,
           {
-            transform: [{ translateY: filterAnim.interpolate({
-              inputRange: [0, 1],
-              outputRange: [-30, 0]
-            })}],
+            transform: [{
+              translateY: filterAnim.interpolate({
+                inputRange: [0, 1],
+                outputRange: [-30, 0]
+              })
+            }],
             opacity: filterAnim
           }
         ]}
       >
         <View style={styles.filterHeader}>
-          <Text style={styles.filterTitle}>Filter by Type</Text>
-          <View style={styles.filterCount}>
-            <Text style={styles.filterCountText}>{filteredNotifications.length}</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <Text style={styles.filterTitle}>{i18n.t('filterByType')}</Text>
+            <View style={styles.filterCount}>
+              <Text style={styles.filterCountText}>{filteredNotifications.length}</Text>
+            </View>
           </View>
-      </View>
+
+          {/* Sound Controls */}
+          <View style={styles.soundControls}>
+            <TouchableOpacity
+              style={[
+                styles.soundButton,
+                soundEnabled && styles.soundButtonActiveOn
+              ]}
+              onPress={() => !soundEnabled && toggleSound()}
+              activeOpacity={0.7}
+            >
+              <Icon
+                name="volume-high"
+                size={14}
+                color={soundEnabled ? '#FFFFFF' : '#6B7280'}
+                style={{ marginRight: 4 }}
+              />
+              <Text style={[
+                styles.soundButtonText,
+                soundEnabled && styles.soundButtonTextActive
+              ]}>SOUND ON</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.soundButton,
+                !soundEnabled && styles.soundButtonActiveOff,
+                { marginLeft: 8 }
+              ]}
+              onPress={() => soundEnabled && toggleSound()}
+              activeOpacity={0.7}
+            >
+              <Icon
+                name="volume-mute"
+                size={14}
+                color={!soundEnabled ? '#FFFFFF' : '#6B7280'}
+                style={{ marginRight: 4 }}
+              />
+              <Text style={[
+                styles.soundButtonText,
+                !soundEnabled && styles.soundButtonTextActive
+              ]}>SOUND OFF</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
         <FlatList
           horizontal
           showsHorizontalScrollIndicator={false}
-          data={[
-            { type: 'all', label: 'All', icon: 'apps' },
-            { type: 'emergency', label: 'Emergency', icon: 'warning' },
-            { type: 'warning', label: 'Warning', icon: 'alert-circle' },
-            { type: 'info', label: 'Info', icon: 'information-circle' }
-          ]}
+          data={filterOptions}
           renderItem={({ item }) => renderFilterChip(item.type, item.label, item.icon)}
           keyExtractor={item => item.type}
           contentContainerStyle={styles.filterList}
         />
       </Animated.View>
-      
-      {/* Enhanced Action Buttons */}
-      <Animated.View 
-        style={[
-          styles.actionsContainer,
-          {
-            transform: [{ translateY: actionAnim.interpolate({
-              inputRange: [0, 1],
-              outputRange: [-20, 0]
-            })}],
-            opacity: actionAnim
-          }
-        ]}
-      >
-        <View style={styles.actionButtonsRow}>
-        <TouchableOpacity 
-          style={styles.actionButton}
-            onPress={() => markFilteredAsRead(filter)}
-            activeOpacity={0.7}
-          >
-            <View style={styles.actionButtonContent}>
-              <Icon name="checkmark-done" size={16} color="#10B981" />
-              <Text style={[styles.actionButtonText, { color: '#10B981' }]}> 
-                Mark {filter === 'all' ? 'All' : filter.charAt(0).toUpperCase() + filter.slice(1)} Read
-              </Text>
-            </View>
-        </TouchableOpacity>
-          
-        <TouchableOpacity 
-          style={styles.actionButton}
-            onPress={() => clearFilteredRead(filter)}
-            activeOpacity={0.7}
-          >
-            <View style={styles.actionButtonContent}>
-              <Icon name="trash-outline" size={16} color="#6B7280" />
-              <Text style={styles.actionButtonText}>
-                Clear {filter === 'all' ? 'All' : filter.charAt(0).toUpperCase() + filter.slice(1)} Read
-              </Text>
-            </View>
-        </TouchableOpacity>
-          
-        <TouchableOpacity 
-          style={styles.actionButton}
-            onPress={() => clearFilteredAll(filter)}
-            activeOpacity={0.7}
-          >
-            <View style={styles.actionButtonContent}>
-              <Icon name="trash" size={16} color="#EF4444" />
-              <Text style={[styles.actionButtonText, { color: '#EF4444' }]}> 
-                Clear {filter === 'all' ? 'All' : filter.charAt(0).toUpperCase() + filter.slice(1)}
-              </Text>
-            </View>
-        </TouchableOpacity>
-      </View>
-      </Animated.View>
 
-      {/* Enhanced Notifications List */}
+      {/* Page-level actions removed (use settings menu instead) */}
+
+      {/* Zone Breach Notifications Section */}
+      {showZoneBreachSection && zoneBreachNotifications.length > 0 && (
+        <Animated.View
+          style={[
+            styles.sectionContainer,
+            {
+              transform: [{
+                translateY: actionAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [-20, 0]
+                })
+              }],
+              opacity: actionAnim
+            }
+          ]}
+        >
+          <View style={styles.sectionHeader}>
+            <View style={styles.sectionHeaderLeft}>
+              <Icon name="location" size={20} color="#DC2626" />
+              <Text style={styles.sectionTitle}>{i18n.t('zoneAlerts')}</Text>
+              <View style={styles.breachCount}>
+                <Text style={styles.breachCountText}>{zoneBreachNotifications.length}</Text>
+              </View>
+            </View>
+            <TouchableOpacity
+              style={styles.collapseButton}
+              onPress={() => setShowZoneBreachSection(!showZoneBreachSection)}
+            >
+              <Icon
+                name={showZoneBreachSection ? "chevron-up" : "chevron-down"}
+                size={16}
+                color="#6B7280"
+              />
+            </TouchableOpacity>
+          </View>
+
+          <FlatList
+            data={zoneBreachNotifications}
+            keyExtractor={(item) => `zone-${item.id}`}
+            renderItem={renderZoneBreachItem}
+            showsVerticalScrollIndicator={false}
+            scrollEnabled={false}
+            contentContainerStyle={styles.zoneBreachList}
+          />
+        </Animated.View>
+      )}
+
+      {/* Regular Notifications Section */}
+      <View style={styles.regularNotificationsContainer}>
+        <View style={styles.sectionHeader}>
+          <View style={styles.sectionHeaderLeft}>
+            <Icon name="notifications" size={20} color="#10B981" />
+            <Text style={styles.sectionTitle}>{i18n.t('otherNotifications')}</Text>
+            <View style={styles.regularCount}>
+              <Text style={styles.regularCountText}>{regularNotifications.length}</Text>
+            </View>
+          </View>
+        </View>
+
         <FlatList
-          data={displayNotifications}
-          keyExtractor={(item) => item.id}
-        renderItem={renderNotificationItem}
-        contentContainerStyle={styles.listContainer}
-        showsVerticalScrollIndicator={false}
-        onScroll={(e) => scrollY.setValue(e.nativeEvent.contentOffset.y)}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            colors={['#10B981']}
-            tintColor="#10B981"
-            progressBackgroundColor="#FFFFFF"
-          />
-        }
-        ListEmptyComponent={
-          <EmptyState
-            icon="notifications-off"
-            title={i18n.t('noNotifications')}
-            subtitle="You're all caught up! New notifications will appear here."
-            iconColor="#D1D5DB"
-          />
-        }
-      />
-        
+          data={regularNotifications}
+          keyExtractor={(item) => `regular-${item.id}`}
+          renderItem={renderNotificationItem}
+          contentContainerStyle={[styles.listContainer, { paddingBottom: styles.listContainer.paddingBottom + Math.max(insets.bottom, 16) }]}
+          showsVerticalScrollIndicator={false}
+          onScroll={(e) => scrollY.setValue(e.nativeEvent.contentOffset.y)}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              colors={['#10B981']}
+              tintColor="#10B981"
+              progressBackgroundColor="#FFFFFF"
+            />
+          }
+          ListEmptyComponent={
+            <EmptyState
+              icon="notifications-off"
+              title={i18n.t('noNotifications')}
+              subtitle={i18n.t('notificationEmptySubtitle')}
+              iconColor="#D1D5DB"
+            />
+          }
+        />
+      </View>
+
       {/* Enhanced Test Section */}
       {showTestSection && (
-        <Animated.View 
+        <Animated.View
           style={styles.testContainer}
           entering={Animated.spring({
             toValue: 1,
@@ -436,59 +569,90 @@ export default function NotificationsScreen({ navigation }) {
           <View style={styles.testHeader}>
             <View style={styles.testHeaderLeft}>
               <Icon name="flask" size={20} color="#10B981" />
-              <Text style={styles.testTitle}>Test Notifications</Text>
+              <Text style={styles.testTitle}>{i18n.t('testNotifications')}</Text>
             </View>
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.closeButton}
               onPress={() => setShowTestSection(false)}
               activeOpacity={0.7}
             >
               <Icon name="close" size={20} color="#6B7280" />
             </TouchableOpacity>
-            </View>
-        
+          </View>
+
           <View style={styles.testButtons}>
-            <TouchableOpacity 
+            <TouchableOpacity
               style={styles.testButton}
               onPress={() => {
                 sendLocalNotification(
-                  'Test Local Notification',
-                  'This is a test local notification',
+                  i18n.t('testLocalNotificationTitle'),
+                  i18n.t('testLocalNotificationMessage'),
                   { type: 'info' }
                 );
               }}
               activeOpacity={0.7}
             >
               <Icon name="phone-portrait" size={16} color="#FFFFFF" />
-              <Text style={styles.testButtonText}>Local</Text>
+              <Text style={styles.testButtonText}>{i18n.t('local')}</Text>
             </TouchableOpacity>
-            
-            <TouchableOpacity 
+
+            <TouchableOpacity
               style={styles.testButton}
               onPress={() => {
                 simulateFirebaseNotification({
                   title: i18n.t('testFirebaseNotification'),
-                  message: 'This is a test Firebase notification',
+                  message: i18n.t('testFirebaseNotificationMessage'),
                   type: 'info'
                 });
               }}
               activeOpacity={0.7}
             >
               <Icon name="cloud" size={16} color="#FFFFFF" />
-              <Text style={styles.testButtonText}>Firebase</Text>
+              <Text style={styles.testButtonText}>{i18n.t('firebase')}</Text>
             </TouchableOpacity>
-            
-            <TouchableOpacity 
+
+            <TouchableOpacity
               style={styles.testButton}
               onPress={diagnosePushNotifications}
               activeOpacity={0.7}
             >
               <Icon name="medical" size={16} color="#FFFFFF" />
-              <Text style={styles.testButtonText}>Diagnose</Text>
+              <Text style={styles.testButtonText}>{i18n.t('diagnose')}</Text>
             </TouchableOpacity>
+
+            <ZoneBreachTestButton />
           </View>
         </Animated.View>
       )}
+
+      {/* Settings Modal */}
+      <Modal transparent visible={settingsVisible} animationType="fade" onRequestClose={() => setSettingsVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>{i18n.t('notificationSettingsTitle')}</Text>
+              <TouchableOpacity onPress={() => setSettingsVisible(false)}>
+                <Icon name="close" size={22} color="#6B7280" />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.modalRow}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Icon name="notifications" size={18} color="#10B981" style={{ marginRight: 8 }} />
+                <Text style={{ fontSize: 15, color: '#374151', fontWeight: '600' }}>{i18n.t('enableNotifications')}</Text>
+              </View>
+              <Switch
+                value={notificationsEnabled}
+                onValueChange={setNotificationsEnabled}
+                trackColor={{ false: '#E5E7EB', true: '#10B981' }}
+                thumbColor={notificationsEnabled ? '#FFFFFF' : '#FFFFFF'}
+                ios_backgroundColor="#E5E7EB"
+              />
+            </View>
+            <View style={styles.divider} />
+            {/* Bulk action buttons removed as requested */}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -722,5 +886,151 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     marginLeft: 6,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: '#E5E7EB',
+    marginVertical: 12,
+  },
+  modalAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    gap: 10,
+  },
+  modalActionText: {
+    fontSize: 14,
+    color: '#374151',
+    fontWeight: '600',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#F3F4F6',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111827',
+  },
+  modalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  sectionContainer: {
+    backgroundColor: '#FEF2F2',
+    marginHorizontal: 16,
+    marginVertical: 8,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#FECACA',
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#FECACA',
+  },
+  sectionHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  sectionTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#111827',
+    marginLeft: 8,
+  },
+  breachCount: {
+    backgroundColor: '#DC2626',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  breachCountText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  regularCount: {
+    backgroundColor: '#10B981',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginLeft: 8,
+  },
+  regularCountText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#FFFFFF',
+  },
+  collapseButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#F9FAFB',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  zoneBreachList: {
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+  },
+  regularNotificationsContainer: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  soundControls: {
+    flexDirection: 'row',
+  },
+  soundButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  soundButtonActiveOn: {
+    backgroundColor: '#10B981',
+    borderColor: '#059669',
+  },
+  soundButtonActiveOff: {
+    backgroundColor: '#EF4444',
+    borderColor: '#DC2626',
+  },
+  soundButtonText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#6B7280',
+    letterSpacing: 0.5,
+  },
+  soundButtonTextActive: {
+    color: '#FFFFFF',
   },
 }); 

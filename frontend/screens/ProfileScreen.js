@@ -1,17 +1,18 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, Image, TouchableOpacity, TextInput, Switch, Alert, Modal, SafeAreaView, Platform, StatusBar, ActivityIndicator, FlatList } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Image, TouchableOpacity, TextInput, Switch, Alert, Modal, Platform, StatusBar, ActivityIndicator, FlatList, RefreshControl } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import Icon from 'react-native-vector-icons/Ionicons';
 import CustomHeader from '../components/CustomHeader';
+import SideDrawer from '../components/SideDrawer';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useNotifications } from '../NotificationContext';
 import { apiService } from '../services/api';
-import i18n, { setLocale } from '../utils/i18n';
+import i18n, { setLocale, addLanguageChangeListener } from '../utils/i18n';
+import { compressImageForUpload, createDataUri } from '../utils/imageCompression';
 import * as Localization from 'expo-localization';
 import { Card } from 'react-native-paper';
-import * as Device from 'expo-device';
 import * as Location from 'expo-location';
-import NetInfo from '@react-native-community/netinfo';
 import { formatDistanceToNow } from 'date-fns';
 // Geometry helpers for zone filtering
 function pointInPolygon(point, polygon) {
@@ -33,26 +34,23 @@ function inferZoneName(person, zones) {
 }
 
 export default function ProfileScreen({ navigation, route }) {
-  // State for managing the password change modal
-  const [passwordModalVisible, setPasswordModalVisible] = useState(false);
-  const [currentPassword, setCurrentPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
-  const [showNewPassword, setShowNewPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  // Disable Reports section globally
+  const REPORTS_ENABLED = false;
+
 
   // Get user role from navigation params or use a default
   const [userRole, setUserRole] = useState(route.params?.userRole || 'soldier');
   const [userName, setUserName] = useState(route.params?.userName || 'Default User');
   const [userUnit, setUserUnit] = useState(route.params?.userUnit || 'Alpha');
-  
+
   // Remove mock user data initialization
   const [userData, setUserData] = useState(null);
   const [soldierOverview, setSoldierOverview] = useState([]);
   const [soldierLoading, setSoldierLoading] = useState(false);
   const [soldierError, setSoldierError] = useState(null);
   const [initialLoad, setInitialLoad] = useState(true);
+  const [logoutModalVisible, setLogoutModalVisible] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   // Soldiers Report Filter States (only states here; derived values below where soldierReports exists)
   const [selectedUnitFilter, setSelectedUnitFilter] = useState('all');
@@ -65,11 +63,25 @@ export default function ProfileScreen({ navigation, route }) {
   // Soldier report derived data is declared after soldierReports state
 
   // Configure status bar
+  const [languagePickerVisible, setLanguagePickerVisible] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState('en');
+  const [currentLanguage, setCurrentLanguage] = useState(i18n.locale);
+
+  // Listen for language changes to force re-render
+  useEffect(() => {
+    const unsubscribe = addLanguageChangeListener(() => {
+      setCurrentLanguage(i18n.locale);
+    });
+    return unsubscribe;
+  }, []);
+
   useLayoutEffect(() => {
     StatusBar.setBarStyle('dark-content');
     if (Platform.OS === 'android') {
       StatusBar.setBackgroundColor('#f5f5f5');
       StatusBar.setTranslucent(false);
+      // Ensure proper safe area handling on Android
+      StatusBar.setHidden(false);
     }
   }, []);
 
@@ -83,7 +95,7 @@ export default function ProfileScreen({ navigation, route }) {
           setUserRole(parsedUserData.role);
           setUserName(parsedUserData.name);
           setUserUnit(parsedUserData.unit);
-          
+
           // Update the userData state with real data
           setUserData(parsedUserData);
         }
@@ -91,9 +103,46 @@ export default function ProfileScreen({ navigation, route }) {
         console.error('Error loading user data:', error);
       }
     };
-    
+
     loadUserData();
   }, []);
+
+  // Load saved language for display only (don't reset locale unnecessarily)
+  useEffect(() => {
+    (async () => {
+      try {
+        const lang = await AsyncStorage.getItem('appLanguage');
+        // Only use supported languages: English, Hindi, Tamil
+        const SUPPORTED_LANGUAGES = ['en', 'hi', 'ta'];
+        if (lang && typeof lang === 'string' && SUPPORTED_LANGUAGES.includes(lang)) {
+          setSelectedLanguage(lang);
+          // Only update locale if it's different from current to avoid resets
+          if (i18n.locale !== lang) {
+            setLocale(lang);
+          }
+        } else if (lang && !SUPPORTED_LANGUAGES.includes(lang)) {
+          // If saved language is not supported, reset to English
+          setSelectedLanguage('en');
+          await AsyncStorage.setItem('appLanguage', 'en');
+          if (i18n.locale !== 'en') {
+            setLocale('en');
+          }
+        }
+      } catch { }
+    })();
+  }, []);
+
+  const handleSelectLanguage = async (code) => {
+    try {
+      // Only allow supported languages: English, Hindi, Tamil
+      const SUPPORTED_LANGUAGES = ['en', 'hi', 'ta'];
+      if (SUPPORTED_LANGUAGES.includes(code)) {
+        setSelectedLanguage(code);
+        await AsyncStorage.setItem('appLanguage', code);
+        setLocale(code);
+      }
+    } catch { }
+  };
 
   // Fetch personal and military information once on mount (no polling)
   useEffect(() => {
@@ -111,29 +160,54 @@ export default function ProfileScreen({ navigation, route }) {
           setUserData(freshUser);
           setTempUserData(freshUser);
         }
-      } catch {}
+      } catch { }
     })();
     return () => { isMounted = false; };
   }, []);
 
-  // In the Soldiers tab/page, fetch soldiers using apiService.getSoldiersByUnit(currentUser.unit) like DashboardScreen
-  // Replace the fetchSoldierOverview/refreshSoldierOverview logic with:
+  // Fetch soldiers by unit_id matching commander's unit_id
   useEffect(() => {
     const fetchSoldiersOverview = async (showLoader = false) => {
-      if (userData && userData.role === 'commander' && userData.unit) {
+      if (userData && userData.role === 'commander' && userData.unit_id) {
         if (showLoader) setSoldierLoading(true);
         setSoldierError(null);
         try {
-          // Align logic with Dashboard: fetch all users then filter by unit and role (case-insensitive, trim)
+          console.log('[ProfileScreen] Fetching soldiers for commander unit_id:', userData.unit_id);
+          // Fetch soldiers by unit_id, sorted alphabetically by name
+          const soldiers = await apiService.getSoldiersByUnitId(userData.unit_id, 'name');
+          console.log('[ProfileScreen] Loaded soldiers:', soldiers?.length || 0);
+          setSoldierOverview(Array.isArray(soldiers) ? soldiers : []);
+        } catch (err) {
+          console.error('[ProfileScreen] Error fetching soldiers:', err);
+          setSoldierError('Failed to fetch soldiers.');
+          setSoldierOverview([]);
+        } finally {
+          if (showLoader) setSoldierLoading(false);
+          setInitialLoad(false);
+        }
+      } else if (userData && userData.role === 'commander' && userData.unit && !userData.unit_id) {
+        // Fallback: if unit_id is not available, use unit name (backward compatibility)
+        console.warn('[ProfileScreen] Commander has unit name but no unit_id, using fallback');
+        if (showLoader) setSoldierLoading(true);
+        setSoldierError(null);
+        try {
           const allUsers = await apiService.getAllUsers();
           const unitNorm = String(userData.unit || '').trim().toLowerCase();
           const unitSoldiers = (allUsers || []).filter(u =>
             String(u.role || '').trim().toLowerCase() === 'soldier' &&
             String(u.unit || '').trim().toLowerCase() === unitNorm
           );
+          // Sort alphabetically by name
+          unitSoldiers.sort((a, b) => {
+            const nameA = (a.name || a.username || '').toLowerCase();
+            const nameB = (b.name || b.username || '').toLowerCase();
+            return nameA.localeCompare(nameB);
+          });
           setSoldierOverview(unitSoldiers);
         } catch (err) {
+          console.error('[ProfileScreen] Error fetching soldiers (fallback):', err);
           setSoldierError('Failed to fetch soldiers.');
+          setSoldierOverview([]);
         } finally {
           if (showLoader) setSoldierLoading(false);
           setInitialLoad(false);
@@ -144,7 +218,23 @@ export default function ProfileScreen({ navigation, route }) {
   }, [userData]);
 
   const refreshSoldierOverview = async () => {
-    if (userData && userData.role === 'commander' && userData.unit) {
+    if (userData && userData.role === 'commander' && userData.unit_id) {
+      setSoldierLoading(true);
+      setSoldierError(null);
+      try {
+        console.log('[ProfileScreen] Refreshing soldiers for commander unit_id:', userData.unit_id);
+        const soldiers = await apiService.getSoldiersByUnitId(userData.unit_id, 'name');
+        console.log('[ProfileScreen] Refreshed soldiers:', soldiers?.length || 0);
+        setSoldierOverview(Array.isArray(soldiers) ? soldiers : []);
+      } catch (err) {
+        console.error('[ProfileScreen] Error refreshing soldiers:', err);
+        setSoldierError('Failed to fetch soldiers.');
+        setSoldierOverview([]);
+      } finally {
+        setSoldierLoading(false);
+      }
+    } else if (userData && userData.role === 'commander' && userData.unit && !userData.unit_id) {
+      // Fallback: use unit name
       setSoldierLoading(true);
       setSoldierError(null);
       try {
@@ -154,36 +244,80 @@ export default function ProfileScreen({ navigation, route }) {
           String(u.role || '').trim().toLowerCase() === 'soldier' &&
           String(u.unit || '').trim().toLowerCase() === unitNorm
         );
+        // Sort alphabetically by name
+        unitSoldiers.sort((a, b) => {
+          const nameA = (a.name || a.username || '').toLowerCase();
+          const nameB = (b.name || b.username || '').toLowerCase();
+          return nameA.localeCompare(nameB);
+        });
         setSoldierOverview(unitSoldiers);
       } catch (err) {
+        console.error('[ProfileScreen] Error refreshing soldiers (fallback):', err);
         setSoldierError('Failed to fetch soldiers.');
+        setSoldierOverview([]);
       } finally {
         setSoldierLoading(false);
       }
     }
   };
 
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try {
+      // Refresh user data
+      const currentUserData = await AsyncStorage.getItem('currentUser');
+      if (currentUserData) {
+        const parsedUserData = JSON.parse(currentUserData);
+        const username = parsedUserData.username || parsedUserData.serviceId;
+        if (username) {
+          const freshUser = await apiService.getUserByUsername(username);
+          if (freshUser && freshUser.name) {
+            setUserData(freshUser);
+            setTempUserData(freshUser);
+            // Update AsyncStorage with fresh data
+            const updatedToSave = { ...freshUser };
+            delete updatedToSave.photo;
+            delete updatedToSave.profileImage;
+            await AsyncStorage.setItem('currentUser', JSON.stringify(updatedToSave));
+          }
+        }
+      }
+
+      // Refresh soldier overview if commander
+      await refreshSoldierOverview();
+
+      // Refresh notifications if commander
+      if (refreshNotifications) {
+        await refreshNotifications();
+      }
+    } catch (error) {
+      console.error('[ProfileScreen] Error refreshing data:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   // Helper functions for user data
   function getRoleServiceId(role) {
-    switch(role) {
+    switch (role) {
       case 'unitAdmin': return 'UA-3000';
       case 'commander': return 'C-4000';
       case 'soldier': return 'S-5000';
       default: return 'S-0000';
     }
   }
-  
+
   function getRoleRank(role) {
-    switch(role) {
+    switch (role) {
       case 'unitAdmin': return 'Captain';
       case 'commander': return 'Lieutenant';
       case 'soldier': return 'Private';
       default: return 'Recruit';
     }
   }
-  
+
   function getRoleClearanceLevel(role) {
-    switch(role) {
+    switch (role) {
       case 'unitAdmin': return 'Level 4';
       case 'commander': return 'Level 3';
       case 'soldier': return 'Level 2';
@@ -192,20 +326,40 @@ export default function ProfileScreen({ navigation, route }) {
   }
 
   const [editing, setEditing] = useState(false);
-  const [tempUserData, setTempUserData] = useState({...userData});
+  const [tempUserData, setTempUserData] = useState(userData || {});
+
+  useEffect(() => {
+    // Keep temp data synced when userData loads/changes
+    if (userData && Object.keys(userData).length > 0) {
+      setTempUserData(prev => ({ ...prev, ...userData }));
+    }
+  }, [userData]);
 
   // State for expanded soldier card in overview
   const [expandedSoldierId, setExpandedSoldierId] = useState(null);
-  
+
   // State for active tab
-  const [activeTab, setActiveTab] = useState(route.params?.initialTab || 'profile'); // 'profile', 'notifications', 'reports', 'soldiers'
-  
+  const [activeTab, setActiveTab] = useState(route.params?.initialTab || 'profile'); // 'profile', 'notifications', 'soldiers'
+
+  // State for side drawer
+  const [sideDrawerVisible, setSideDrawerVisible] = useState(false);
+
   // Update activeTab if initialTab param changes (e.g., on navigation)
   useEffect(() => {
     if (route.params?.initialTab && route.params.initialTab !== activeTab) {
-      setActiveTab(route.params.initialTab);
+      // Prevent selecting disabled 'reports' from outside
+      const next = route.params.initialTab === 'reports' ? 'profile' : route.params.initialTab;
+      setActiveTab(next);
     }
   }, [route.params?.initialTab]);
+
+  // If commander, avoid showing Profile first; jump to Alerts by default
+  useEffect(() => {
+    const role = String(userData?.role || '').trim().toLowerCase();
+    if (role === 'commander' && activeTab === 'profile') {
+      setActiveTab('notifications');
+    }
+  }, [userData, activeTab]);
 
   // Remove mock reports data
   const [reports, setReports] = useState([]);
@@ -218,51 +372,54 @@ export default function ProfileScreen({ navigation, route }) {
     markAllAsRead,
     clearAll,
     clearRead,
-    refreshNotifications
+    refreshNotifications,
+    stopAlertSound
   } = useNotifications();
 
-  // Add a flag to indicate if a database is linked
-  const isDatabaseLinked = false; // Set to true when database is connected
+  // Database is linked – persist edits to backend
+  const isDatabaseLinked = true;
 
   // Function to handle saving user profile changes
   const saveProfileChanges = async () => {
     try {
-      // Get all users from AsyncStorage
-      const usersData = await AsyncStorage.getItem('users');
-      if (usersData) {
-        const users = JSON.parse(usersData);
-        
-        // Update the current user's data
-        if (users[userData.serviceId]) {
-          users[userData.serviceId] = {
-            ...users[userData.serviceId],
-            name: tempUserData.name,
-            email: tempUserData.email,
-            phone: tempUserData.phone,
-            specialization: tempUserData.specialization,
-            // Don't update sensitive fields like role, serviceId
-          };
-          
-          // Save updated users back to AsyncStorage
-          await AsyncStorage.setItem('users', JSON.stringify(users));
-          
-          // Update currentUser in AsyncStorage
-          await AsyncStorage.setItem('currentUser', JSON.stringify({
-            ...users[userData.serviceId]
-          }));
-          
-          // Update local state
-          setUserData(tempUserData);
-          setUserName(tempUserData.name);
-          
-          Alert.alert('Success', 'Profile updated successfully');
-        }
+      if (!userData?.id) {
+        Alert.alert('Error', 'Missing User Login ID. Please login again.');
+        return;
       }
+      const payload = {
+        username: tempUserData.username,
+        name: tempUserData.name,
+        email: tempUserData.email,
+        phone: tempUserData.phone,
+      };
+      // Clean undefined fields
+      Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
+
+      let updated = {};
+      if (isDatabaseLinked) {
+        updated = await apiService.updateUser(userData.id, payload);
+      } else {
+        updated = { ...userData, ...payload };
+      }
+
+      // Persist session user and update local UI
+      try {
+        const stored = await AsyncStorage.getItem('currentUser');
+        const curr = stored ? JSON.parse(stored) : {};
+        const merged = { ...curr, ...updated };
+        const mergedToSave = { ...merged };
+        delete mergedToSave.photo;
+        delete mergedToSave.profileImage;
+        await AsyncStorage.setItem('currentUser', JSON.stringify(mergedToSave));
+        setUserData(merged);
+        setUserName(merged.name);
+      } catch { }
+
+      Alert.alert('Success', 'Profile updated successfully');
     } catch (error) {
       console.error('Error saving profile changes:', error);
-      Alert.alert('Error', 'Failed to save profile changes');
+      Alert.alert('Error', error?.message || 'Failed to save profile changes');
     }
-    
     setEditing(false);
   };
 
@@ -277,117 +434,78 @@ export default function ProfileScreen({ navigation, route }) {
             text: i18n.t('cancel'),
             style: "cancel"
           },
-          { 
-            text: i18n.t('save'), 
+          {
+            text: i18n.t('save'),
             onPress: saveProfileChanges
           }
         ]
       );
     } else {
-      setTempUserData({...userData});
+      setTempUserData({ ...userData });
       setEditing(true);
     }
   };
 
   const handleInputChange = (field, value) => {
-    setTempUserData({
-      ...tempUserData,
-      [field]: value
-    });
+    // Allow editing of safe fields
+    const allowed = ['username', 'name', 'email', 'phone'];
+    if (!allowed.includes(field)) return;
+    setTempUserData(prev => ({ ...prev, [field]: value }));
   };
 
-  // Function to handle password change
-  const handlePasswordChange = async () => {
-    // Validate password inputs
-    if (!currentPassword) {
-      Alert.alert('Error', 'Please enter your current password');
-      return;
-    }
-    
-    if (!newPassword) {
-      Alert.alert('Error', 'Please enter a new password');
-      return;
-    }
-    
-    if (newPassword.length < 6) {
-      Alert.alert('Error', 'New password must be at least 6 characters');
-      return;
-    }
-    
-    if (newPassword !== confirmPassword) {
-      Alert.alert('Error', 'New passwords do not match');
-      return;
-    }
-    
-    try {
-      // Get users from AsyncStorage
-      const usersData = await AsyncStorage.getItem('users');
-      if (usersData) {
-        const users = JSON.parse(usersData);
-        
-        // Check if current password is correct
-        if (users[userData.serviceId] && users[userData.serviceId].password === currentPassword) {
-          // Update password
-          users[userData.serviceId].password = newPassword;
-          
-          // Save updated users back to AsyncStorage
-          await AsyncStorage.setItem('users', JSON.stringify(users));
-          
-          // Reset form and close modal
-          setCurrentPassword('');
-          setNewPassword('');
-          setConfirmPassword('');
-          setPasswordModalVisible(false);
-          
-          Alert.alert('Success', 'Password changed successfully');
-        } else {
-          Alert.alert('Error', 'Current password is incorrect');
-        }
-      }
-    } catch (error) {
-      console.error('Error changing password:', error);
-      Alert.alert('Error', 'Failed to change password');
-    }
-  };
+
 
   // Change profile photo: pick image and upload base64 to backend, then update local state
   const handleChangePhoto = async () => {
     try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission required', 'We need access to your photo library to set your profile picture.');
-        return;
-      }
-      const result = await ImagePicker.launchImageLibraryAsync({
-        allowsEditing: true,
-        aspect: [1, 1],
-        quality: 0.5,
-        base64: true,
-      });
-      if (result.canceled) return;
-      const asset = result.assets && result.assets[0];
-      if (!asset || !asset.base64) {
-        Alert.alert('Error', 'Could not read selected image.');
-        return;
-      }
       if (!userData?.id) {
         Alert.alert('Error', 'Missing User Login ID. Please login again.');
         return;
       }
-      // Build data URI for consistent rendering on all platforms
-      const mime = asset.mimeType || 'image/jpeg';
-      const dataUri = `data:${mime};base64,${asset.base64}`;
+
+      // Use the image compression utility — min 10 KB, max 100 KB
+      const compressedImage = await compressImageForUpload({
+        minSizeBytes: 10 * 1024,  // 10 KB minimum
+        maxSizeBytes: 50 * 1024, // 50 KB maximum
+        initialQuality: 0.7,
+        maxAttempts: 5,
+        aspect: [1, 1],
+        allowsEditing: true
+      });
+
+      if (!compressedImage) {
+        return; // User cancelled or compression failed
+      }
+
+      // Create data URI
+      const dataUri = createDataUri(compressedImage);
+
+      // Show loading indicator
+      Alert.alert('Uploading', 'Please wait while your photo is being uploaded...', [], { cancelable: false });
 
       // Upload to backend with data URI (server normalizes to raw base64)
       await apiService.updateUserPhoto(userData.id, dataUri);
+
       // Update local cached user with data URI for direct rendering
       const updated = { ...(userData || {}), photo: dataUri };
       setUserData(updated);
-      await AsyncStorage.setItem('currentUser', JSON.stringify(updated));
-      Alert.alert('Success', 'Profile photo updated');
+      const updatedToSave = { ...updated };
+      delete updatedToSave.photo;
+      delete updatedToSave.profileImage;
+      await AsyncStorage.setItem('currentUser', JSON.stringify(updatedToSave));
+
+      Alert.alert('Success', 'Profile photo updated successfully!');
     } catch (e) {
       console.error('Change photo error:', e);
-      Alert.alert('Error', e?.message || 'Failed to update profile photo');
+
+      // Handle specific error types
+      if (e.message && e.message.includes('413')) {
+        Alert.alert('Error', 'Image is too large. Please select a smaller image.');
+      } else if (e.message && e.message.includes('Network')) {
+        Alert.alert('Error', 'Network error. Please check your connection and try again.');
+      } else {
+        Alert.alert('Error', e?.message || 'Failed to update profile photo. Please try again.');
+      }
     }
   };
 
@@ -417,51 +535,7 @@ export default function ProfileScreen({ navigation, route }) {
     }
   };
 
-  const languageOptions = [
-    { code: 'en', label: 'English' },
-    { code: 'hi', label: 'Hindi' },
-    { code: 'te', label: 'Telugu' },
-    { code: 'ta', label: 'Tamil' },
-    { code: 'kn', label: 'Kannada' },
-    { code: 'ml', label: 'Malayalam' },
-    { code: 'mr', label: 'Marathi' },
-    { code: 'gu', label: 'Gujarati' },
-    { code: 'pa', label: 'Punjabi' },
-    { code: 'bn', label: 'Bengali' },
-  ];
 
-  const [languageModalVisible, setLanguageModalVisible] = useState(false);
-  const [selectedLanguage, setSelectedLanguage] = useState('en');
-
-  useEffect(() => {
-    // Load language from AsyncStorage
-    const loadLanguage = async () => {
-      const lang = await AsyncStorage.getItem('appLanguage');
-      console.log('[ProfileScreen] loadLanguage - stored language:', lang);
-      if (lang) {
-        setSelectedLanguage(lang);
-        setLocale(lang); // Use the new setLocale function
-        console.log('[ProfileScreen] loadLanguage - set language to:', lang);
-      } else {
-        // Use device locale as fallback
-        const deviceLang = Localization.locale.split('-')[0];
-        console.log('[ProfileScreen] loadLanguage - using device language:', deviceLang);
-        setSelectedLanguage(deviceLang);
-        setLocale(deviceLang); // Use the new setLocale function
-      }
-    };
-    loadLanguage();
-  }, []);
-
-  const handleLanguageSelect = async (lang) => {
-    console.log('[ProfileScreen] handleLanguageSelect called with:', lang);
-    setSelectedLanguage(lang);
-    setLocale(lang); // Use the new setLocale function
-    await AsyncStorage.setItem('appLanguage', lang);
-    setLanguageModalVisible(false);
-    console.log('[ProfileScreen] Language change completed');
-    // Optionally force re-render or use context
-  };
 
   // Soldier Overview Card
   const renderSoldierCard = ({ item }) => (
@@ -521,199 +595,246 @@ export default function ProfileScreen({ navigation, route }) {
     };
 
     return (
-      <ScrollView contentContainerStyle={styles.scrollContainer}>
+      <View style={styles.scrollContainer}>
         {/* Profile Header */}
         <View style={styles.header}>
-          <View style={styles.profileImageContainer}>
-            {userData && (userData.photo || userData.profileImage) ? (
-              <Image
-                source={{ uri: userData.photo?.startsWith('data:') ? userData.photo : (userData.photo ? `data:image/jpeg;base64,${userData.photo}` : userData.profileImage) }}
-                style={styles.profileImage}
-              />
-            ) : (
-              <View style={styles.profileImagePlaceholder}>
-                <Icon name="person" size={50} color="#fff" />
-              </View>
-            )}
-            <View style={styles.badgeContainer}>
-              <View style={styles.roleBadge}>
-                <Text style={styles.roleBadgeText}>{userData && userData.role ? getRoleName(userData.role) : ''}</Text>
+          <View style={styles.profileHeaderContent}>
+            {/* Profile Image on Left */}
+            <View style={styles.profileImageContainer}>
+              {userData && (userData.photo || userData.profileImage) ? (
+                <Image
+                  source={{ uri: userData.photo?.startsWith('data:') ? userData.photo : (userData.photo ? `data:image/jpeg;base64,${userData.photo}` : userData.profileImage) }}
+                  style={styles.profileImage}
+                />
+              ) : (
+                <View style={styles.profileImagePlaceholder}>
+                  <Icon name="person" size={50} color="#fff" />
+                </View>
+              )}
+              <View style={styles.badgeContainer}>
+                <View style={styles.roleBadge}>
+                  <Text style={styles.roleBadgeText}>{userData && userData.role ? getRoleName(userData.role) : ''}</Text>
+                </View>
               </View>
             </View>
-          </View>
-          <View style={styles.profileInfo}>
-            <Text style={styles.name}>{userData && userData.name ? userData.name : ''}</Text>
-            <Text style={styles.serviceId}>{userData && userData.serviceId ? `ID: ${userData.serviceId}` : ''}</Text>
-            <View style={styles.unitInfo}>
-              <Icon name="people" size={16} color="#2E3192" />
-              <Text style={styles.unitText}>{userData && userData.unit ? `${userData.unit} Unit` : ''}</Text>
-            </View>
-          </View>
-          <TouchableOpacity style={styles.editButton} onPress={toggleEditing}>
-            <Icon name={editing ? "save" : "create-outline"} size={20} color="#fff" />
-            <Text style={styles.editButtonText}>{editing ? i18n.t('save') : i18n.t('editProfile')}</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[styles.editButton, { marginTop: 10, backgroundColor: '#4CAF50' }]} onPress={handleChangePhoto}>
-            <Icon name="camera" size={20} color="#fff" />
-            <Text style={styles.editButtonText}>Change Photo</Text>
-          </TouchableOpacity>
-        </View>
-        
-        {/* Change Password Button */}
-        <TouchableOpacity 
-          style={styles.changePasswordButton}
-          onPress={() => setPasswordModalVisible(true)}
-        >
-          <Icon name="lock-closed" size={20} color="#2E3192" />
-          <Text style={styles.changePasswordText}>Change Password</Text>
-        </TouchableOpacity>
 
-        {/* User Information */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Personnel Information</Text>
-          
-          {userData && userData.name ? (
-            <View style={styles.infoContainer}>
+            {/* Soldier Info on Right */}
+            <View style={styles.profileInfo}>
+              <Text style={styles.name}>{userData && userData.name ? userData.name : ''}</Text>
+              <Text style={styles.serviceId}>
+                {userData && userData.serviceId ? `${i18n.t('serviceIdLabel')}: ${userData.serviceId}` : ''}
+              </Text>
+              <View style={styles.unitInfo}>
+                <Icon name="people" size={16} color="#2E3192" />
+                <Text style={styles.unitText}>
+                  {userData && userData.unit ? `${userData.unit} ${i18n.t('unit')}` : ''}
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          {/* Action Buttons */}
+          <View style={styles.actionButtonsContainer}>
+            <TouchableOpacity style={styles.editButton} onPress={toggleEditing}>
+              <Icon name={editing ? "save" : "create-outline"} size={20} color="#fff" />
+              <Text style={styles.editButtonText}>{editing ? i18n.t('save') : i18n.t('editProfile')}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.editButton, { backgroundColor: '#4CAF50' }]} onPress={handleChangePhoto}>
+              <Icon name="camera" size={20} color="#fff" />
+              <Text style={styles.editButtonText}>{i18n.t('changePhoto')}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* Soldier Information */}
+        <View style={[styles.section, { borderWidth: 1, borderColor: '#e9ecf1', borderRadius: 12, padding: 12 }]}>
+          <Text style={[styles.sectionTitle, { color: '#2E3192', marginBottom: 8 }]}>{i18n.t('soldierInformation')}</Text>
+
+          {userData ? (
+            <View style={[styles.infoContainer, { backgroundColor: '#fff' }]}>
               <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Name</Text>
+                <Text style={styles.infoLabel}>{`${i18n.t('employeeId')}:`}</Text>
+                <Text style={styles.infoValue}>{userData.EmployeeID || userData.id || '-'}</Text>
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('username')}:`}</Text>
+                {editing ? (
+                  <TextInput
+                    style={styles.infoInput}
+                    value={tempUserData.username}
+                    onChangeText={(value) => handleInputChange('username', value)}
+                    placeholder={i18n.t('username')}
+                    placeholderTextColor="#999"
+                    autoCapitalize="none"
+                  />
+                ) : (
+                  <Text style={styles.infoValue}>{userData.username || '-'}</Text>
+                )}
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('name')}:`}</Text>
                 {editing ? (
                   <TextInput
                     style={styles.infoInput}
                     value={tempUserData.name}
                     onChangeText={(value) => handleInputChange('name', value)}
                     placeholder={i18n.t('name')}
+                    placeholderTextColor="#999"
                   />
                 ) : (
-                  <Text style={styles.infoValue}>{userData.name}</Text>
+                  <Text style={styles.infoValue}>{userData.name || '-'}</Text>
                 )}
               </View>
-              
+
               <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Email</Text>
-                {editing ? (
-                  <TextInput
-                    style={styles.infoInput}
-                    value={tempUserData.email}
-                    onChangeText={(value) => handleInputChange('email', value)}
-                    placeholder={i18n.t('email')}
-                    keyboardType="email-address"
-                  />
-                ) : (
-                  <Text style={styles.infoValue}>{userData.email}</Text>
-                )}
+                <Text style={styles.infoLabel}>{`${i18n.t('role')}:`}</Text>
+                <Text style={styles.infoValue}>{getRoleName(userData.role) || '-'}</Text>
               </View>
-              
+
               <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Mobile Number</Text>
+                <Text style={styles.infoLabel}>{`${i18n.t('email')}:`}</Text>
+                <Text style={styles.infoValue}>{userData.email || '-'}</Text>
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('unit')}:`}</Text>
+                <Text style={styles.infoValue}>{userData.unit || '-'}</Text>
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('category')}:`}</Text>
+                <Text style={styles.infoValue}>{userData.category || '-'}</Text>
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('mobileNumber')}:`}</Text>
                 <Text style={styles.infoValue}>{
                   (userData && (userData.MobileNumber || userData.phone || userData.mobile || userData.mobile_number))
                     ? (userData.MobileNumber || userData.phone || userData.mobile || userData.mobile_number)
                     : '-'
                 }</Text>
               </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('createdAt')}:`}</Text>
+                <Text style={styles.infoValue}>
+                  {userData && userData.created_at
+                    ? new Date(userData.created_at).toLocaleDateString() + ' ' + new Date(userData.created_at).toLocaleTimeString()
+                    : '-'
+                  }
+                </Text>
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('lastLoginAttempt')}:`}</Text>
+                <Text style={styles.infoValue}>
+                  {userData && userData.last_login_attempt
+                    ? new Date(userData.last_login_attempt).toLocaleDateString() + ' ' + new Date(userData.last_login_attempt).toLocaleTimeString()
+                    : '-'
+                  }
+                </Text>
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('lastLoginSuccess')}:`}</Text>
+                <Text style={styles.infoValue}>
+                  {userData && userData.last_login_success
+                    ? new Date(userData.last_login_success).toLocaleDateString() + ' ' + new Date(userData.last_login_success).toLocaleTimeString()
+                    : '-'
+                  }
+                </Text>
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('latitude')}:`}</Text>
+                <Text style={styles.infoValue}>
+                  {userData && userData.latitude !== null && userData.latitude !== undefined
+                    ? userData.latitude.toString()
+                    : '-'
+                  }
+                </Text>
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('longitude')}:`}</Text>
+                <Text style={styles.infoValue}>
+                  {userData && userData.longitude !== null && userData.longitude !== undefined
+                    ? userData.longitude.toString()
+                    : '-'
+                  }
+                </Text>
+              </View>
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>{`${i18n.t('commander')}:`}</Text>
+                <Text style={styles.infoValue}>{commanderName}</Text>
+              </View>
             </View>
           ) : (
             <View style={styles.emptyContainer}>
-              <Text style={styles.emptyText}>No personal information available</Text>
-            </View>
-          )}
-        </View>
-        
-        {/* Military Information */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Military Information</Text>
-          {userData ? (
-            <View style={styles.infoContainer}>
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Service ID</Text>
-                <Text style={styles.infoValue}>{userData.username || userData.serviceId || '-'}</Text>
-              </View>
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Role</Text>
-                <Text style={styles.infoValue}>{getRoleName(userData.role)}</Text>
-              </View>
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Unit</Text>
-                <Text style={styles.infoValue}>{userData.unit || '-'}</Text>
-              </View>
-              <View style={styles.infoRow}>
-                <Text style={styles.infoLabel}>Years of Service</Text>
-                <Text style={styles.infoValue}>{userData.serviceYears || '-'}</Text>
-              </View>
-            </View>
-          ) : (
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyText}>No military information available</Text>
+              <Text style={styles.emptyText}>{i18n.t('noSoldierInfo')}</Text>
             </View>
           )}
         </View>
 
-        {/* System Information */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>System Information</Text>
-          <View style={styles.infoCardList}>
-            <View style={styles.infoCardRow}>
-              <Text style={styles.infoLabel}>Device Model</Text>
-              <Text style={styles.infoValue}>{systemInfo.deviceModel}</Text>
-            </View>
-            <View style={styles.infoCardRow}>
-              <Text style={styles.infoLabel}>OS</Text>
-              <Text style={styles.infoValue}>{systemInfo.os}</Text>
-            </View>
-            <View style={styles.infoCardRow}>
-              <Text style={styles.infoLabel}>IP Address</Text>
-              <Text style={styles.infoValue}>{systemInfo.ip}</Text>
-            </View>
-            <View style={styles.infoCardRow}>
-              <Text style={styles.infoLabel}>Network Type</Text>
-              <Text style={styles.infoValue}>{systemInfo.networkType}</Text>
-            </View>
-            <View style={styles.infoCardRow}>
-              <Text style={styles.infoLabel}>Current Location</Text>
-              <Text style={styles.infoValue}>{systemInfo.location}</Text>
-            </View>
-            <View style={styles.infoCardRow}>
-              <Text style={styles.infoLabel}>Session Duration</Text>
-              <Text style={styles.infoValue}>{formatDuration(Date.now() - systemInfo.sessionStart)}</Text>
-            </View>
-          </View>
-        </View>
-        
         {/* Logout Button */}
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.logoutButton}
-          onPress={() => {
-            Alert.alert(
-              "Logout",
-              "Are you sure you want to logout?",
-              [
-                { text: i18n.t('cancel'), style: "cancel" },
-                { 
-                  text: i18n.t('logout'), 
-                  onPress: async () => {
+          onPress={() => setLogoutModalVisible(true)}
+        >
+          <Icon name="log-out" size={20} color="#fff" />
+          <Text style={styles.logoutText}>{i18n.t('logout')}</Text>
+        </TouchableOpacity>
+
+        {/* Logout Confirm Modal */}
+        <Modal
+          visible={logoutModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setLogoutModalVisible(false)}
+        >
+          <View style={styles.logoutModalBackdrop}>
+            <View style={styles.logoutModalCard}>
+              <Text style={styles.logoutModalTitle}>{i18n.t('logoutConfirmTitle')}</Text>
+              <Text style={styles.logoutModalSubtitle}>{i18n.t('logoutConfirmMessage')}</Text>
+
+              <View style={styles.logoutModalActionsRow}>
+                <TouchableOpacity
+                  style={[styles.logoutModalActionButton, styles.logoutModalSecondaryButton]}
+                  activeOpacity={0.8}
+                  onPress={() => setLogoutModalVisible(false)}
+                >
+                  <Text style={styles.logoutModalSecondaryText}>{(i18n.t && i18n.t('cancel')) ? i18n.t('cancel').toUpperCase() : 'CANCEL'}</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.logoutModalActionButton, styles.logoutModalPrimaryButton]}
+                  activeOpacity={0.8}
+                  onPress={async () => {
+                    setLogoutModalVisible(false);
                     try {
+                      if (stopAlertSound) stopAlertSound();
+                      if (clearAll) clearAll();
                       await AsyncStorage.removeItem('currentUser');
-                      navigation.navigate('Login');
+                      if (navigation && navigation.reset) {
+                        navigation.reset({ index: 0, routes: [{ name: 'Login' }] });
+                      } else {
+                        navigation.navigate('Login');
+                      }
                     } catch (error) {
                       console.error('Error logging out:', error);
                     }
-                  }
-                }
-              ]
-            );
-          }}
-        >
-          <Icon name="log-out" size={20} color="#fff" />
-          <Text style={styles.logoutText}>Logout</Text>
-        </TouchableOpacity>
+                  }}
+                >
+                  <Text style={styles.logoutModalPrimaryText}>{(i18n.t && i18n.t('logout')) ? i18n.t('logout').toUpperCase() : 'LOGOUT'}</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
 
-        {/* Language Selector */}
-        <TouchableOpacity style={styles.languageSelector} onPress={() => setLanguageModalVisible(true)}>
-          <Icon name="language-outline" size={20} color="#2A6F2B" />
-          <Text style={styles.languageSelectorText}>Language: {languageOptions.find(l => l.code === selectedLanguage)?.label || 'English'}</Text>
-          <Icon name="chevron-down" size={18} color="#2A6F2B" />
-        </TouchableOpacity>
-      </ScrollView>
+      </View>
     );
   };
 
@@ -762,7 +883,8 @@ export default function ProfileScreen({ navigation, route }) {
     try {
       setAlertsError(null);
       const data = await apiService.getAlerts();
-      setAlerts(Array.isArray(data) ? data : []);
+      const alertsArray = Array.isArray(data) ? data : [];
+      setAlerts(alertsArray);
     } catch (e) {
       setAlertsError('Failed to load alerts.');
     } finally {
@@ -770,6 +892,11 @@ export default function ProfileScreen({ navigation, route }) {
       setAlertsRefreshing(false);
     }
   };
+
+  useEffect(() => {
+    // Fetch alerts for all users to show count in header
+    fetchAlerts();
+  }, []);
 
   useEffect(() => {
     if (activeTab === 'notifications') {
@@ -923,7 +1050,7 @@ export default function ProfileScreen({ navigation, route }) {
                   <View style={{ flex: 1 }}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                       <Text style={{ fontWeight: 'bold', fontSize: 15, color: '#222' }}>{item.title || (item.alert_type || '').replace(/_/g, ' ').toUpperCase()}</Text>
-                      <View style={{ backgroundColor: getSeverityColor(item.severity), paddingHorizontal: 8, paddingVertical: 2, borderRadius: 12 }}>
+                      <View style={[styles.soldierDetailAlertSeverity, { backgroundColor: getAlertSeverityColor(item.severity) }]}>
                         <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 11 }}>{(item.severity || '').toUpperCase()}</Text>
                       </View>
                     </View>
@@ -948,7 +1075,7 @@ export default function ProfileScreen({ navigation, route }) {
   const [profileReportsError, setProfileReportsError] = useState(null);
 
   useEffect(() => {
-    if (activeTab === 'reports') {
+    if (REPORTS_ENABLED && activeTab === 'reports') {
       setProfileReportsLoading(true);
       setProfileReportsError(null);
       apiService.getReports()
@@ -964,10 +1091,17 @@ export default function ProfileScreen({ navigation, route }) {
     setIsCommander(role === 'commander');
   }, [userData]);
 
+  // Force-hide Reports tab for all roles
+  useEffect(() => {
+    if (activeTab === 'reports') {
+      setActiveTab('profile');
+    }
+  }, [activeTab]);
+
   // Load commander categories
   useEffect(() => {
     const loadCommanderCategory = async () => {
-      if (!(activeTab === 'reports' && isCommander)) return;
+      if (!(REPORTS_ENABLED && activeTab === 'reports' && isCommander)) return;
       setReportsLoading(true);
       setReportsError(null);
       try {
@@ -1005,7 +1139,7 @@ export default function ProfileScreen({ navigation, route }) {
   // Load zones and compute commander's current zone(s) once when opening Reports as commander
   useEffect(() => {
     const loadZonesForReports = async () => {
-      if (!(activeTab === 'reports' && isCommander)) return;
+      if (!(REPORTS_ENABLED && activeTab === 'reports' && isCommander)) return;
       try {
         const fetchedZones = await apiService.getZones();
         const formattedZones = (fetchedZones || []).map(zone => ({
@@ -1013,21 +1147,31 @@ export default function ProfileScreen({ navigation, route }) {
           name: zone.unit_name || zone.name || `Zone ${zone.id}`,
           coordinates: Array.isArray(zone.coordinates)
             ? zone.coordinates
-                .map(pt => Array.isArray(pt) && pt.length === 2
-                  ? { latitude: Number(pt[0]), longitude: Number(pt[1]) }
-                  : pt
-                )
-                .filter(pt => pt && typeof pt.latitude === 'number' && !isNaN(pt.latitude) && typeof pt.longitude === 'number' && !isNaN(pt.longitude))
+              .map(pt => Array.isArray(pt) && pt.length === 2
+                ? { latitude: Number(pt[0]), longitude: Number(pt[1]) }
+                : pt
+              )
+              .filter(pt => pt && typeof pt.latitude === 'number' && !isNaN(pt.latitude) && typeof pt.longitude === 'number' && !isNaN(pt.longitude))
             : [],
           color: zone.color || '#009688',
         }));
         const uniqueZones = Array.from(new Map(formattedZones.map(z => [z.id, z])).values());
         setZonesForReports(uniqueZones);
-        // Determine commander's current zone based on device location
+        // DISABLED: Location permission request - using database location only
+        // Commander zone determination disabled - not needed for database-based location
+        /*
         try {
           const { status } = await Location.requestForegroundPermissionsAsync();
           if (status === 'granted') {
-            const loc = await Location.getCurrentPositionAsync({});
+            if (user.latitude && user.longitude) {
+              const inside = zones.filter(z =>
+                pointInPolygon(
+                  { latitude: user.latitude, longitude: user.longitude },
+                  z.coordinates
+                )
+              );
+            }
+
             const myLat = loc?.coords?.latitude;
             const myLng = loc?.coords?.longitude;
             if (typeof myLat === 'number' && typeof myLng === 'number') {
@@ -1036,8 +1180,9 @@ export default function ProfileScreen({ navigation, route }) {
               setCommanderZones(zoneNames);
             }
           }
-        } catch {}
-      } catch {}
+        } catch { }
+        */
+      } catch { }
     };
     loadZonesForReports();
   }, [activeTab, isCommander]);
@@ -1069,7 +1214,7 @@ export default function ProfileScreen({ navigation, route }) {
             <Text style={styles.assetId}>{item.assetId || item.id}</Text>
             <Text style={styles.assetName}>{item.name}</Text>
           </View>
-          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(item.status) }]}> 
+          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(item.status) }]}>
             <Text style={styles.statusText}>{i18n.t(item.status?.toLowerCase()) || item.status}</Text>
           </View>
         </View>
@@ -1109,17 +1254,19 @@ export default function ProfileScreen({ navigation, route }) {
 
   const renderReportsContent = () => (
     <View style={styles.tabContent}>
+      {/* Show same categories for both commanders and soldiers */}
+      <View style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 4 }}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <FilterChip label="Soldier Report" active={selectedCategory === 'soldier'} onPress={() => setSelectedCategory('soldier')} icon="people" />
+          <FilterChip label="Operation Report" active={selectedCategory === 'operation'} onPress={() => setSelectedCategory('operation')} icon="construct" />
+          <FilterChip label="Ammo & Equipment" active={selectedCategory === 'ammo'} onPress={() => setSelectedCategory('ammo')} icon="cube" />
+          <FilterChip label="Alerts & Incidents" active={selectedCategory === 'alerts'} onPress={() => setSelectedCategory('alerts')} icon="alert-circle" />
+          <FilterChip label="Unit Change Requests" active={selectedCategory === 'unitChange'} onPress={() => setSelectedCategory('unitChange')} icon="swap-horizontal" />
+        </ScrollView>
+      </View>
+
       {isCommander ? (
         <>
-          <View style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 4 }}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              <FilterChip label="Soldier Report" active={selectedCategory === 'soldier'} onPress={() => setSelectedCategory('soldier')} icon="people" />
-              <FilterChip label="Operation Report" active={selectedCategory === 'operation'} onPress={() => setSelectedCategory('operation')} icon="construct" />
-              <FilterChip label="Ammo & Equipment" active={selectedCategory === 'ammo'} onPress={() => setSelectedCategory('ammo')} icon="cube" />
-              <FilterChip label="Alerts & Incidents" active={selectedCategory === 'alerts'} onPress={() => setSelectedCategory('alerts')} icon="alert-circle" />
-              <FilterChip label="Unit Change Requests" active={selectedCategory === 'unitChange'} onPress={() => setSelectedCategory('unitChange')} icon="swap-horizontal" />
-            </ScrollView>
-          </View>
           {reportsLoading ? (
             <View style={styles.listContainer}><Text>{i18n.t('loading') || 'Loading...'}</Text></View>
           ) : reportsError ? (
@@ -1192,9 +1339,9 @@ export default function ProfileScreen({ navigation, route }) {
                 animationType="fade"
                 onRequestClose={() => setUnitFilterVisible(false)}
               >
-                <TouchableOpacity 
-                  style={styles.modalOverlay} 
-                  activeOpacity={1} 
+                <TouchableOpacity
+                  style={styles.modalOverlay}
+                  activeOpacity={1}
                   onPress={() => setUnitFilterVisible(false)}
                 >
                   <View style={styles.dropdownModal}>
@@ -1226,9 +1373,9 @@ export default function ProfileScreen({ navigation, route }) {
                 animationType="fade"
                 onRequestClose={() => setRankFilterVisible(false)}
               >
-                <TouchableOpacity 
-                  style={styles.modalOverlay} 
-                  activeOpacity={1} 
+                <TouchableOpacity
+                  style={styles.modalOverlay}
+                  activeOpacity={1}
                   onPress={() => setRankFilterVisible(false)}
                 >
                   <View style={styles.dropdownModal}>
@@ -1260,9 +1407,9 @@ export default function ProfileScreen({ navigation, route }) {
                 animationType="fade"
                 onRequestClose={() => setStatusFilterVisible(false)}
               >
-                <TouchableOpacity 
-                  style={styles.modalOverlay} 
-                  activeOpacity={1} 
+                <TouchableOpacity
+                  style={styles.modalOverlay}
+                  activeOpacity={1}
                   onPress={() => setStatusFilterVisible(false)}
                 >
                   <View style={styles.dropdownModal}>
@@ -1330,45 +1477,61 @@ export default function ProfileScreen({ navigation, route }) {
           )}
         </>
       ) : (
-        <>
-          <View style={styles.tabContainer}>
-            <TouchableOpacity
-              style={[styles.tab, profileReportsTab === 'status' && styles.activeTab]}
-              onPress={() => setProfileReportsTab('status')}
-            >
-              <Icon name="pulse" size={20} color={profileReportsTab === 'status' ? '#2196F3' : '#757575'} />
-              <Text style={[styles.tabText, profileReportsTab === 'status' && styles.activeTabText]}>{i18n.t('status')}</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.tab, profileReportsTab === 'history' && styles.activeTab]}
-              onPress={() => setProfileReportsTab('history')}
-            >
-              <Icon name="time" size={20} color={profileReportsTab === 'history' ? '#2196F3' : '#757575'} />
-              <Text style={[styles.tabText, profileReportsTab === 'history' && styles.activeTabText]}>{i18n.t('history')}</Text>
-            </TouchableOpacity>
+        // Soldier Coming Soon content
+        <View style={styles.comingSoonContainer}>
+          <Icon name="construct-outline" size={64} color="#2E3192" style={styles.comingSoonIcon} />
+          <Text style={styles.comingSoonTitle}>Coming Soon</Text>
+          <Text style={styles.comingSoonDescription}>
+            {selectedCategory === 'soldier' && 'Soldier reports and status tracking will be available soon.'}
+            {selectedCategory === 'operation' && 'Operation reports and mission tracking will be available soon.'}
+            {selectedCategory === 'ammo' && 'Ammunition and equipment reports will be available soon.'}
+            {selectedCategory === 'alerts' && 'Alert and incident reports will be available soon.'}
+            {selectedCategory === 'unitChange' && 'Unit change request reports will be available soon.'}
+          </Text>
+          <View style={styles.comingSoonFeatures}>
+            <Text style={styles.comingSoonFeaturesTitle}>Planned Features:</Text>
+            {selectedCategory === 'soldier' && (
+              <>
+                <Text style={styles.comingSoonFeature}>• Personal status tracking</Text>
+                <Text style={styles.comingSoonFeature}>• Location history reports</Text>
+                <Text style={styles.comingSoonFeature}>• Performance metrics</Text>
+                <Text style={styles.comingSoonFeature}>• Health status reports</Text>
+              </>
+            )}
+            {selectedCategory === 'operation' && (
+              <>
+                <Text style={styles.comingSoonFeature}>• Mission participation history</Text>
+                <Text style={styles.comingSoonFeature}>• Operation status updates</Text>
+                <Text style={styles.comingSoonFeature}>• Task completion reports</Text>
+                <Text style={styles.comingSoonFeature}>• Mission briefing access</Text>
+              </>
+            )}
+            {selectedCategory === 'ammo' && (
+              <>
+                <Text style={styles.comingSoonFeature}>• Equipment status tracking</Text>
+                <Text style={styles.comingSoonFeature}>• Ammunition usage reports</Text>
+                <Text style={styles.comingSoonFeature}>• Maintenance schedules</Text>
+                <Text style={styles.comingSoonFeature}>• Inventory management</Text>
+              </>
+            )}
+            {selectedCategory === 'alerts' && (
+              <>
+                <Text style={styles.comingSoonFeature}>• Personal alert history</Text>
+                <Text style={styles.comingSoonFeature}>• Emergency notifications</Text>
+                <Text style={styles.comingSoonFeature}>• Incident reports</Text>
+                <Text style={styles.comingSoonFeature}>• Safety alerts</Text>
+              </>
+            )}
+            {selectedCategory === 'unitChange' && (
+              <>
+                <Text style={styles.comingSoonFeature}>• Transfer request status</Text>
+                <Text style={styles.comingSoonFeature}>• Unit change history</Text>
+                <Text style={styles.comingSoonFeature}>• Assignment updates</Text>
+                <Text style={styles.comingSoonFeature}>• Transfer notifications</Text>
+              </>
+            )}
           </View>
-          {profileReportsLoading ? (
-            <View style={styles.listContainer}><Text>{i18n.t('loading') || 'Loading...'}</Text></View>
-          ) : profileReportsError ? (
-            <View style={styles.listContainer}><Text style={{color:'red'}}>{profileReportsError}</Text></View>
-          ) : profileReportsTab === 'status' ? (
-            <FlatList
-              data={assetStatusData}
-              renderItem={renderAssetStatusItem}
-              keyExtractor={item => item.id?.toString() || Math.random().toString()}
-              contentContainerStyle={styles.listContainer}
-              ListEmptyComponent={<Text>{i18n.t('noReports')}</Text>}
-            />
-          ) : (
-            <FlatList
-              data={historyData}
-              renderItem={renderHistoryItem}
-              keyExtractor={item => item.id?.toString() || Math.random().toString()}
-              contentContainerStyle={styles.listContainer}
-              ListEmptyComponent={<Text>{i18n.t('noReports')}</Text>}
-            />
-          )}
-        </>
+        </View>
       )}
     </View>
   );
@@ -1381,6 +1544,10 @@ export default function ProfileScreen({ navigation, route }) {
   const [savingSoldier, setSavingSoldier] = useState(false);
   const [soldierDetailModalVisible, setSoldierDetailModalVisible] = useState(false);
   const [selectedSoldierForDetail, setSelectedSoldierForDetail] = useState(null);
+  const [soldierDetailVitals, setSoldierDetailVitals] = useState(null);
+  const [soldierDetailVitalsLoading, setSoldierDetailVitalsLoading] = useState(false);
+  const [soldierDetailLocation, setSoldierDetailLocation] = useState(null);
+  const [soldierDetailTasks, setSoldierDetailTasks] = useState(null);
 
   const openEditSoldier = (soldier) => {
     setSelectedSoldier(soldier);
@@ -1421,7 +1588,7 @@ export default function ProfileScreen({ navigation, route }) {
 
   const saveEditSoldier = async () => {
     if (!validateEditSoldierForm()) return;
-    
+
     setSavingSoldier(true);
     try {
       if (!selectedSoldier?.id) {
@@ -1441,10 +1608,26 @@ export default function ProfileScreen({ navigation, route }) {
 
       const updated = await apiService.updateUser(selectedSoldier.id, payload);
       console.log('Update response:', updated);
-      
+
+      // Persist latest user to AsyncStorage if this is the logged-in user
+      try {
+        const stored = await AsyncStorage.getItem('currentUser');
+        if (stored) {
+          const curr = JSON.parse(stored);
+          if (curr && Number(curr.id) === Number(selectedSoldier.id)) {
+            const merged = { ...curr, ...updated };
+            const mergedToSave = { ...merged };
+            delete mergedToSave.photo;
+            delete mergedToSave.profileImage;
+            await AsyncStorage.setItem('currentUser', JSON.stringify(mergedToSave));
+            setUserData(merged);
+          }
+        }
+      } catch { }
+
       // Update local list with server response when available
       setSoldierOverview(prev => (prev || []).map(s => s.id === selectedSoldier.id ? { ...s, ...updated } : s));
-      
+
       setEditSoldierVisible(false);
       resetEditSoldierForm();
       Alert.alert('Success', 'Soldier updated successfully');
@@ -1455,24 +1638,110 @@ export default function ProfileScreen({ navigation, route }) {
       setSavingSoldier(false);
     }
   };
-  const handleSoldierPress = (soldier) => {
+  const handleSoldierPress = async (soldier) => {
     setSelectedSoldierForDetail(soldier);
     setSoldierDetailModalVisible(true);
+    setSoldierDetailVitalsLoading(true);
+
+    // Fetch all additional data for this soldier
+    if (soldier.id || soldier.username) {
+      try {
+        const soldierId = soldier.id || soldier.username;
+        console.log('[ProfileScreen] Fetching detail data for soldier:', soldierId);
+
+        // Fetch health vitals
+        const vitals = await apiService.getHealthVitals(soldierId);
+        console.log('[ProfileScreen] Fetched detail vitals:', vitals);
+        setSoldierDetailVitals(vitals);
+
+        // Set location from survival_table (comes with vitals) or soldier data
+        if (vitals && (vitals.latitude && vitals.longitude)) {
+          setSoldierDetailLocation({
+            latitude: parseFloat(vitals.latitude),
+            longitude: parseFloat(vitals.longitude),
+            timestamp: vitals.recorded_at
+          });
+        } else if (soldier.latitude && soldier.longitude) {
+          setSoldierDetailLocation({
+            latitude: parseFloat(soldier.latitude),
+            longitude: parseFloat(soldier.longitude),
+            timestamp: soldier.lastUpdate || soldier.last_active
+          });
+        } else {
+          setSoldierDetailLocation(null);
+        }
+
+        // Fetch soldier assignments from assignments table
+        try {
+          console.log('[ProfileScreen] Fetching assignments for unit:', userData.unit_id);
+          console.log('[ProfileScreen] Commander unit data:', {
+            unit_id: userData.unit_id,
+            unit_name: userData.unit,
+            id: userData.id
+          });
+
+          // Get all assignments for the unit (assignments are assigned to units, not individual soldiers)
+          const assignments = await apiService.getAssignments({
+            unitId: userData.unit_id // Only unitId is needed/supported
+          });
+
+          console.log('[ProfileScreen] API Response - Raw assignments:', assignments);
+          console.log('[ProfileScreen] API Response - Type:', typeof assignments);
+          console.log('[ProfileScreen] API Response - Length:', assignments?.length);
+
+          if (assignments && Array.isArray(assignments) && assignments.length > 0) {
+            console.log('[ProfileScreen] Processing', assignments.length, 'assignments');
+            assignments.forEach((assignment, index) => {
+              console.log(`[ProfileScreen] Assignment ${index + 1} details:`, {
+                assignment_id: assignment.assignment_id,
+                assignment_name: assignment.assignment_name,
+                brief_description: assignment.brief_description,
+                type: assignment.type,
+                priority: assignment.priority,
+                destination: assignment.destination,
+                status: assignment.status,
+                unit_id: assignment.unit_id,
+                allKeys: Object.keys(assignment)
+              });
+            });
+          } else {
+            console.log('[ProfileScreen] No assignments found or invalid response');
+          }
+
+          setSoldierDetailTasks(assignments || []);
+        } catch (assignmentError) {
+          console.error('[ProfileScreen] Error fetching assignments:', assignmentError);
+          console.error('[ProfileScreen] Error details:', assignmentError.message);
+          setSoldierDetailTasks([]);
+        }
+
+      } catch (error) {
+        console.error('[ProfileScreen] Error fetching detail data:', error);
+        setSoldierDetailVitals(null);
+        setSoldierDetailLocation(null);
+        setSoldierDetailTasks([]);
+      } finally {
+        setSoldierDetailVitalsLoading(false);
+      }
+    } else {
+      setSoldierDetailVitalsLoading(false);
+      setSoldierDetailLocation(null);
+      setSoldierDetailTasks([]);
+    }
   };
 
   // Helper function to get role name
   const getRoleName = (role) => {
-    switch(role) {
-      case 'unitAdmin': return 'Unit Admin';
-      case 'commander': return 'Commander';
-      case 'soldier': return 'Soldier';
-      default: return 'Unknown';
+    switch (role) {
+      case 'unitAdmin': return i18n.t('roleLabels.unitAdmin');
+      case 'commander': return i18n.t('roleLabels.commander');
+      case 'soldier': return i18n.t('roleLabels.soldier');
+      default: return i18n.t('roleLabels.unknown');
     }
   };
 
-  // Helper function to get task status color
   const getTaskStatusColor = (status) => {
-    switch((status || '').toLowerCase()) {
+    switch ((status || '').toLowerCase()) {
       case 'completed':
         return '#4CAF50';
       case 'in-progress':
@@ -1482,6 +1751,46 @@ export default function ProfileScreen({ navigation, route }) {
         return '#757575';
       default:
         return '#757575';
+    }
+  };
+
+  const getTaskStatusLabel = (status) => {
+    switch ((status || '').toLowerCase()) {
+      case 'completed':
+        return i18n.t('taskStatus.completed');
+      case 'in-progress':
+      case 'in_progress':
+      case 'in progress':
+        return i18n.t('taskStatus.inProgress');
+      case 'pending':
+      default:
+        return i18n.t('taskStatus.pending');
+    }
+  };
+
+  const getAlertSeverityColor = (severity) => {
+    switch ((severity || '').toLowerCase()) {
+      case 'high':
+        return '#F44336';
+      case 'medium':
+        return '#FF9800';
+      case 'low':
+        return '#4CAF50';
+      default:
+        return '#757575';
+    }
+  };
+
+  const getAlertSeverityLabel = (severity) => {
+    switch ((severity || '').toLowerCase()) {
+      case 'high':
+        return i18n.t('alertSeverity.high');
+      case 'medium':
+        return i18n.t('alertSeverity.medium');
+      case 'low':
+        return i18n.t('alertSeverity.low');
+      default:
+        return severity || i18n.t('alertSeverity.medium');
     }
   };
 
@@ -1513,8 +1822,8 @@ export default function ProfileScreen({ navigation, route }) {
               </View>
             </View>
             {userData && String(userData.role || '').trim().toLowerCase() === 'commander' && (
-              <TouchableOpacity 
-                onPress={() => openEditSoldier(item)} 
+              <TouchableOpacity
+                onPress={() => openEditSoldier(item)}
                 style={styles.editSoldierCardBtn}
               >
                 <Icon name="create-outline" size={16} color="#fff" style={{ marginRight: 4 }} />
@@ -1567,10 +1876,12 @@ export default function ProfileScreen({ navigation, route }) {
             <View style={{ flex: 1 }}>
               {item.tasks && item.tasks.length > 0 ? (
                 <Text style={styles.soldierCardInfoText}>
-                  {item.tasks.length} task{item.tasks.length !== 1 ? 's' : ''} assigned
+                  {item.tasks.length}{' '}
+                  {item.tasks.length === 1 ? i18n.t('task') : i18n.t('tasks')}{' '}
+                  {i18n.t('assigned')}
                 </Text>
               ) : (
-                <Text style={styles.soldierCardInfoText}>No tasks assigned</Text>
+                <Text style={styles.soldierCardInfoText}>{i18n.t('noTasksAssigned')}</Text>
               )}
             </View>
           </View>
@@ -1580,7 +1891,7 @@ export default function ProfileScreen({ navigation, route }) {
             style={styles.viewMoreButton}
             onPress={() => handleSoldierPress(item)}
           >
-            <Text style={styles.viewMoreButtonText}>View More</Text>
+            <Text style={styles.viewMoreButtonText}>{i18n.t('viewMore')}</Text>
             <Icon name="chevron-forward" size={16} color="#fff" />
           </TouchableOpacity>
         </View>
@@ -1590,7 +1901,7 @@ export default function ProfileScreen({ navigation, route }) {
     return (
       <View style={{ flex: 1, backgroundColor: '#fff', paddingHorizontal: 8 }}>
         <View style={styles.soldierOverviewHeader}>
-          <Text style={styles.soldierOverviewTitle}>Soldiers Overview</Text>
+          <Text style={styles.soldierOverviewTitle}>{i18n.t('mySoldiers')}</Text>
           <TouchableOpacity onPress={refreshSoldierOverview} style={styles.refreshSoldierButton}>
             <Icon name="refresh" size={22} color="#2E3192" />
           </TouchableOpacity>
@@ -1598,7 +1909,7 @@ export default function ProfileScreen({ navigation, route }) {
         {initialLoad ? (
           <View style={styles.soldierLoadingContainer}>
             <ActivityIndicator size="large" color="#2E3192" />
-            <Text style={styles.soldierLoadingText}>Loading soldiers...</Text>
+            <Text style={styles.soldierLoadingText}>{i18n.t('loadingSoldiers')}</Text>
           </View>
         ) : soldierError ? (
           <View style={styles.soldierErrorContainer}>
@@ -1608,7 +1919,7 @@ export default function ProfileScreen({ navigation, route }) {
         ) : soldierOverview.length === 0 ? (
           <View style={styles.soldierEmptyContainer}>
             <Icon name="people-outline" size={48} color="#757575" />
-            <Text style={styles.soldierEmptyText}>No soldiers found</Text>
+            <Text style={styles.soldierEmptyText}>{i18n.t('noSoldiersFound')}</Text>
           </View>
         ) : (
           <FlatList
@@ -1629,105 +1940,97 @@ export default function ProfileScreen({ navigation, route }) {
     navigation.setOptions({ headerShown: false });
   }, [navigation]);
 
-  const [systemInfo, setSystemInfo] = useState({
-    deviceModel: '',
-    os: '',
-    ip: '',
-    networkType: '',
-    location: '',
-    sessionStart: Date.now(),
-  });
 
+  // 1. Add at the top with other useState declarations:
+  const [commanderName, setCommanderName] = useState('');
+
+  // 2. After userData useEffect (around line 150):
   useEffect(() => {
-    async function fetchSystemInfo() {
-      // Device Model and OS
-      const deviceModel = Device.modelName || Device.deviceName || '-';
-      const os = `${Device.osName} ${Device.osVersion}`;
-      // Network Info
-      let ip = '-';
-      let networkType = '-';
-      try {
-        const net = await NetInfo.fetch();
-        networkType = net.type || '-';
-        ip = net.details?.ipAddress || '-';
-      } catch {}
-      // Location
-      let locationStr = '-';
-      try {
-        let { status } = await Location.requestForegroundPermissionsAsync();
-        if (status === 'granted') {
-          const loc = await Location.getCurrentPositionAsync({});
-          locationStr = `${loc.coords.latitude.toFixed(5)}, ${loc.coords.longitude.toFixed(5)}`;
+    const fetchCommander = async () => {
+      if (userData && userData.unit) {
+        try {
+          const allUsers = await apiService.getAllUsers();
+          const commander = allUsers.find(
+            u => String(u.role || '').toLowerCase() === 'commander' && u.unit === userData.unit
+          );
+          setCommanderName(commander?.name || commander?.username || 'N/A');
+        } catch (error) {
+          console.error('Error fetching commander:', error);
+          setCommanderName('N/A');
         }
-      } catch {}
-      setSystemInfo(info => ({
-        ...info,
-        deviceModel,
-        os,
-        ip,
-        networkType,
-        location: locationStr,
-      }));
-    }
-    fetchSystemInfo();
-  }, []);
+      }
+    };
+    fetchCommander();
+  }, [userData?.unit]);
 
-  // Helper to format session duration
-  function formatDuration(ms) {
-    const totalSec = Math.floor(ms / 1000);
-    const h = Math.floor(totalSec / 3600);
-    const m = Math.floor((totalSec % 3600) / 60);
-    const s = totalSec % 60;
-    return `${h > 0 ? h + 'h ' : ''}${m > 0 ? m + 'm ' : ''}${s}s`;
-  }
 
   return (
-    <View style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="dark-content" backgroundColor="#f5f5f5" />
       <View style={styles.container}>
         {/* Custom Header inside SafeAreaView */}
         <View style={styles.headerWrapper}>
-          <CustomHeader 
-            title={i18n.t('profile')} 
+          <CustomHeader
+            title={i18n.t('profile')}
             navigation={navigation}
             userRole={userRole}
             userName={userName}
             unreadNotifications={unreadCount}
-            hideIcons={activeTab === 'profile' || activeTab === 'notifications' || activeTab === 'reports' || activeTab === 'soldiers'}
+            hideIcons={false}
+            onMenuPress={() => setSideDrawerVisible(true)}
+            showLanguageIcon={true}
+            onPressLanguage={() => setLanguagePickerVisible(true)}
           />
         </View>
+        <Modal
+          visible={languagePickerVisible}
+          animationType="fade"
+          transparent
+          onRequestClose={() => setLanguagePickerVisible(false)}
+        >
+          <TouchableOpacity
+            activeOpacity={1}
+            onPress={() => setLanguagePickerVisible(false)}
+            style={styles.langOverlay}
+          >
+            <View style={styles.langPopup}>
+              <Text style={styles.langTitle}>{i18n.t('selectLanguage') || 'Select Language'}</Text>
+              <View style={styles.langOptionsRow}>
+                {['en', 'hi', 'ta'].map(code => (
+                  <TouchableOpacity
+                    key={code}
+                    style={[styles.langOptionChip, selectedLanguage === code && styles.langOptionChipActive]}
+                    onPress={() => handleSelectLanguage(code)}
+                  >
+                    <Text style={[styles.langOptionText, selectedLanguage === code && styles.langOptionTextActive]}>
+                      {code.toUpperCase()}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <TouchableOpacity onPress={() => setLanguagePickerVisible(false)} style={styles.langCloseBtn}>
+                <Text style={styles.langCloseText}>{i18n.t('ok') || 'OK'}</Text>
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </Modal>
         {/* Tab Buttons */}
         <View style={styles.tabContainer}>
           {/* Profile Tab */}
-          <TouchableOpacity
-            style={[styles.tabButton, activeTab === 'profile' && styles.activeTabButton]}
-            onPress={() => setActiveTab('profile')}
-          >
-            <Icon name="person" size={24} color={activeTab === 'profile' ? '#2E3192' : '#757575'} />
-            {activeTab === 'profile' && (
-              <Text style={[styles.tabButtonText, styles.sharedTabLabel, styles.activeTabButtonText]} numberOfLines={1} ellipsizeMode='tail'>{i18n.t('profile')}</Text>
-            )}
-          </TouchableOpacity>
-          {/* Notifications Tab */}
-          <TouchableOpacity
-            style={[styles.tabButton, activeTab === 'notifications' && styles.activeTabButton]}
-            onPress={() => setActiveTab('notifications')}
-          >
-            <Icon name="notifications" size={24} color={activeTab === 'notifications' ? '#2E3192' : '#757575'} />
-            {activeTab === 'notifications' && (
-              <Text style={[styles.tabButtonText, styles.sharedTabLabel, styles.activeTabButtonText]} numberOfLines={1} ellipsizeMode='tail'>{i18n.t('alerts')}</Text>
-            )}
-          </TouchableOpacity>
-          {/* Reports Tab */}
-          <TouchableOpacity
-            style={[styles.tabButton, activeTab === 'reports' && styles.activeTabButton]}
-            onPress={() => setActiveTab('reports')}
-          >
-            <Icon name="document-text" size={24} color={activeTab === 'reports' ? '#2E3192' : '#757575'} />
-            {activeTab === 'reports' && (
-              <Text style={[styles.tabButtonText, styles.sharedTabLabel, styles.activeTabButtonText]} numberOfLines={1} ellipsizeMode='tail'>{i18n.t('reports')}</Text>
-            )}
-          </TouchableOpacity>
+
+          {/* Notifications Tab (only commanders) */}
+          {userData && userData.role && userData.role.trim().toLowerCase() === 'commander' && (
+            <TouchableOpacity
+              style={[styles.tabButton, activeTab === 'notifications' && styles.activeTabButton]}
+              onPress={() => setActiveTab('notifications')}
+            >
+              <Icon name="person" size={24} color={activeTab === 'notifications' ? '#2E3192' : '#757575'} />
+              {activeTab === 'notifications' && (
+                <Text style={[styles.tabButtonText, styles.sharedTabLabel, styles.activeTabButtonText]} numberOfLines={1} ellipsizeMode='tail'>{i18n.t('profile')}</Text>
+              )}
+            </TouchableOpacity>
+          )}
+          {/* Reports Tab removed */}
           {/* Soldiers Tab (only for commander) */}
           {userData && userData.role && userData.role.trim().toLowerCase() === 'commander' && (
             <TouchableOpacity onPress={() => setActiveTab('soldiers')} style={[styles.tabButton, activeTab === 'soldiers' && styles.activeTabButton]}>
@@ -1738,158 +2041,84 @@ export default function ProfileScreen({ navigation, route }) {
             </TouchableOpacity>
           )}
         </View>
-        
+
         {/* Tab Content */}
         <View style={styles.contentContainer}>
-          {activeTab === 'profile' && renderProfileContent()}
-          {activeTab === 'notifications' && renderNotificationsContent()}
-          {activeTab === 'reports' && renderReportsContent()}
-          {activeTab === 'soldiers' && userData && userData.role && userData.role.trim().toLowerCase() === 'commander' && renderSoldiersContent()}
+          <FlatList
+            data={[{ key: 'content' }]}
+            keyExtractor={(item) => item.key}
+            renderItem={() => null}
+            refreshControl={
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+            }
+            ListHeaderComponent={
+              <>
+                {activeTab === 'profile' && renderProfileContent()}
+                {activeTab === 'notifications' && userData && userData.role && userData.role.trim().toLowerCase() === 'commander' && renderProfileContent()}
+                {/* Reports content removed */}
+                {activeTab === 'soldiers' && userData && userData.role && userData.role.trim().toLowerCase() === 'commander' && renderSoldiersContent()}
+              </>
+            }
+          />
         </View>
 
-        {/* Password Change Modal */}
-        <Modal
-          animationType="slide"
-          transparent={true}
-          visible={passwordModalVisible}
-          onRequestClose={() => setPasswordModalVisible(false)}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContainer}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>{i18n.t('changePassword')}</Text>
-                <TouchableOpacity onPress={() => setPasswordModalVisible(false)}>
-                  <Icon name="close" size={24} color="#333" />
-                </TouchableOpacity>
-              </View>
-              
-              <View style={styles.modalContent}>
-                {/* Current Password */}
-                <View style={styles.passwordInputContainer}>
-                  <Icon name="lock-closed" size={20} color="#2E3192" style={styles.passwordIcon} />
-                  <TextInput
-                    style={styles.passwordInput}
-                    placeholder={i18n.t('currentPassword')}
-                    secureTextEntry={!showCurrentPassword}
-                    value={currentPassword}
-                    onChangeText={setCurrentPassword}
-                  />
-                  <TouchableOpacity onPress={() => setShowCurrentPassword(!showCurrentPassword)}>
-                    <Icon 
-                      name={showCurrentPassword ? "eye-off" : "eye"} 
-                      size={20} 
-                      color="#757575" 
-                    />
-                  </TouchableOpacity>
-                </View>
-                
-                {/* New Password */}
-                <View style={styles.passwordInputContainer}>
-                  <Icon name="key" size={20} color="#2E3192" style={styles.passwordIcon} />
-                  <TextInput
-                    style={styles.passwordInput}
-                    placeholder={i18n.t('newPassword')}
-                    secureTextEntry={!showNewPassword}
-                    value={newPassword}
-                    onChangeText={setNewPassword}
-                  />
-                  <TouchableOpacity onPress={() => setShowNewPassword(!showNewPassword)}>
-                    <Icon 
-                      name={showNewPassword ? "eye-off" : "eye"} 
-                      size={20} 
-                      color="#757575" 
-                    />
-                  </TouchableOpacity>
-                </View>
-                
-                {/* Confirm New Password */}
-                <View style={styles.passwordInputContainer}>
-                  <Icon name="key" size={20} color="#2E3192" style={styles.passwordIcon} />
-                  <TextInput
-                    style={styles.passwordInput}
-                    placeholder={i18n.t('confirmNewPassword')}
-                    secureTextEntry={!showConfirmPassword}
-                    value={confirmPassword}
-                    onChangeText={setConfirmPassword}
-                  />
-                  <TouchableOpacity onPress={() => setShowConfirmPassword(!showConfirmPassword)}>
-                    <Icon 
-                      name={showConfirmPassword ? "eye-off" : "eye"} 
-                      size={20} 
-                      color="#757575" 
-                    />
-                  </TouchableOpacity>
-                </View>
-                
-                <TouchableOpacity 
-                  style={styles.changePasswordButton}
-                  onPress={handlePasswordChange}
-                >
-                  <Text style={styles.changePasswordText}>{i18n.t('updatePassword')}</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </Modal>
+        {/* Side Drawer */}
+        <SideDrawer
+          visible={sideDrawerVisible}
+          onClose={() => setSideDrawerVisible(false)}
+          navigation={navigation}
+        />
 
-        {/* Language Selector Modal */}
-        <Modal visible={languageModalVisible} transparent animationType="slide">
-          <View style={styles.modalOverlay}>
-            <View style={styles.languageModalCard}>
-              <Text style={styles.languageModalTitle}>{i18n.t('selectLanguage') || 'Select Language'}</Text>
-              {languageOptions.map(lang => (
-                <TouchableOpacity key={lang.code} style={styles.languageModalItem} onPress={() => handleLanguageSelect(lang.code)}>
-                  <Text style={styles.languageModalItemText}>{lang.label}</Text>
-                </TouchableOpacity>
-              ))}
-              <TouchableOpacity style={styles.languageModalCancelButton} onPress={() => setLanguageModalVisible(false)}>
-                <Text style={styles.languageModalCancelText}>{i18n.t('cancel') || 'Cancel'}</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
 
         {/* Soldier Detail Modal */}
         <Modal visible={soldierDetailModalVisible} transparent animationType="slide" onRequestClose={() => {
           setSoldierDetailModalVisible(false);
           setSelectedSoldierForDetail(null);
+          setSoldierDetailVitals(null);
+          setSoldierDetailVitalsLoading(false);
+          setSoldierDetailLocation(null);
+          setSoldierDetailTasks(null);
         }}>
           <View style={styles.modalOverlay}>
             <View style={styles.soldierDetailModalContainer}>
               <View style={styles.soldierDetailModalHeader}>
-                <Text style={styles.soldierDetailModalTitle}>Soldier Details</Text>
+                <Text style={styles.soldierDetailModalTitle}>{i18n.t('soldierDetails')}</Text>
                 <TouchableOpacity onPress={() => {
                   setSoldierDetailModalVisible(false);
                   setSelectedSoldierForDetail(null);
+                  setSoldierDetailVitals(null);
+                  setSoldierDetailVitalsLoading(false);
+                  setSoldierDetailLocation(null);
+                  setSoldierDetailTasks(null);
                 }}>
                   <Icon name="close" size={24} color="#333" />
                 </TouchableOpacity>
               </View>
-              
+
               <ScrollView style={styles.soldierDetailModalContent}>
                 {selectedSoldierForDetail && (
                   <>
-                    {/* Soldier Name */}
+                    {/* Soldier Information */}
                     <View style={styles.soldierDetailSection}>
                       <View style={styles.soldierDetailHeader}>
                         <Icon name="person" size={24} color="#2E3192" />
-                        <Text style={styles.soldierDetailSectionTitle}>Soldier Information</Text>
+                        <Text style={styles.soldierDetailSectionTitle}>{i18n.t('soldierInformationTitle')}</Text>
                       </View>
                       <View style={styles.soldierDetailField}>
-                        <Text style={styles.soldierDetailLabel}>Soldier Name:</Text>
-                        <Text style={styles.soldierDetailValue}>{selectedSoldierForDetail.name || 'N/A'}</Text>
+                        <Text style={styles.soldierDetailLabel}>{`${i18n.t('soldierName')}:`}</Text>
+                        <Text style={styles.soldierDetailValue}>{selectedSoldierForDetail.name || i18n.t('notAvailable')}</Text>
                       </View>
                       <View style={styles.soldierDetailField}>
-                        <Text style={styles.soldierDetailLabel}>Soldier ID:</Text>
-                        <Text style={styles.soldierDetailValue}>{selectedSoldierForDetail.username || selectedSoldierForDetail.id || 'N/A'}</Text>
+                        <Text style={styles.soldierDetailLabel}>{`${i18n.t('soldierId')}:`}</Text>
+                        <Text style={styles.soldierDetailValue}>{selectedSoldierForDetail.username || selectedSoldierForDetail.id || i18n.t('notAvailable')}</Text>
                       </View>
                       <View style={styles.soldierDetailField}>
-                        <Text style={styles.soldierDetailLabel}>Unit:</Text>
-                        <Text style={styles.soldierDetailValue}>{selectedSoldierForDetail.unit || 'N/A'}</Text>
+                        <Text style={styles.soldierDetailLabel}>{`${i18n.t('unit')}:`}</Text>
+                        <Text style={styles.soldierDetailValue}>{selectedSoldierForDetail.unit || i18n.t('notAvailable')}</Text>
                       </View>
                       <View style={styles.soldierDetailField}>
-                        <Text style={styles.soldierDetailLabel}>Rank:</Text>
-                        <Text style={styles.soldierDetailValue}>{selectedSoldierForDetail.rank || 'N/A'}</Text>
+                        <Text style={styles.soldierDetailLabel}>{`${i18n.t('rank')}:`}</Text>
+                        <Text style={styles.soldierDetailValue}>{selectedSoldierForDetail.rank || i18n.t('notAvailable')}</Text>
                       </View>
                     </View>
 
@@ -1897,21 +2126,21 @@ export default function ProfileScreen({ navigation, route }) {
                     <View style={styles.soldierDetailSection}>
                       <View style={styles.soldierDetailHeader}>
                         <Icon name="location" size={24} color="#F44336" />
-                        <Text style={styles.soldierDetailSectionTitle}>Current Location</Text>
+                        <Text style={styles.soldierDetailSectionTitle}>{i18n.t('currentLocationTitle')}</Text>
                       </View>
                       <View style={styles.soldierDetailField}>
-                        <Text style={styles.soldierDetailLabel}>Coordinates:</Text>
+                        <Text style={styles.soldierDetailLabel}>{`${i18n.t('coordinates')}:`}</Text>
                         <Text style={styles.soldierDetailValue}>
-                          {selectedSoldierForDetail.location && selectedSoldierForDetail.location.latitude && selectedSoldierForDetail.location.longitude
-                            ? `${selectedSoldierForDetail.location.latitude.toFixed(6)}, ${selectedSoldierForDetail.location.longitude.toFixed(6)}`
-                            : 'No location data available'}
+                          {soldierDetailLocation && soldierDetailLocation.latitude !== undefined && soldierDetailLocation.longitude !== undefined
+                            ? `${soldierDetailLocation.latitude.toFixed(6)}, ${soldierDetailLocation.longitude.toFixed(6)}`
+                            : i18n.t('noLocationData')}
                         </Text>
                       </View>
-                      {selectedSoldierForDetail.location && selectedSoldierForDetail.location.recorded_at && (
+                      {soldierDetailLocation && soldierDetailLocation.timestamp && (
                         <View style={styles.soldierDetailField}>
-                          <Text style={styles.soldierDetailLabel}>Last Updated:</Text>
+                          <Text style={styles.soldierDetailLabel}>{`${i18n.t('lastUpdated')}:`}</Text>
                           <Text style={styles.soldierDetailValue}>
-                            {new Date(selectedSoldierForDetail.location.recorded_at).toLocaleString()}
+                            {new Date(soldierDetailLocation.timestamp).toLocaleString()}
                           </Text>
                         </View>
                       )}
@@ -1921,67 +2150,91 @@ export default function ProfileScreen({ navigation, route }) {
                     <View style={styles.soldierDetailSection}>
                       <View style={styles.soldierDetailHeader}>
                         <Icon name="heart" size={24} color="#E91E63" />
-                        <Text style={styles.soldierDetailSectionTitle}>Health Vitals</Text>
+                        <Text style={styles.soldierDetailSectionTitle}>{i18n.t('healthVitals')}</Text>
                       </View>
-                      <View style={styles.soldierDetailField}>
-                        <Text style={styles.soldierDetailLabel}>Heart Rate:</Text>
-                        <Text style={styles.soldierDetailValue}>
-                          {selectedSoldierForDetail.health?.heart_rate || selectedSoldierForDetail.heartRate || '72'} bpm
-                        </Text>
-                      </View>
-                      <View style={styles.soldierDetailField}>
-                        <Text style={styles.soldierDetailLabel}>Temperature:</Text>
-                        <Text style={styles.soldierDetailValue}>
-                          {selectedSoldierForDetail.health?.temperature || selectedSoldierForDetail.temperature || '36.8'}°C
-                        </Text>
-                      </View>
-                      <View style={styles.soldierDetailField}>
-                        <Text style={styles.soldierDetailLabel}>Blood Pressure:</Text>
-                        <Text style={styles.soldierDetailValue}>
-                          {selectedSoldierForDetail.health?.blood_pressure || '120/80'} mmHg
-                        </Text>
-                      </View>
-                      <View style={styles.soldierDetailField}>
-                        <Text style={styles.soldierDetailLabel}>Oxygen Saturation:</Text>
-                        <Text style={styles.soldierDetailValue}>
-                          {selectedSoldierForDetail.health?.oxygen_saturation || '98'}%
-                        </Text>
-                      </View>
+                      {soldierDetailVitalsLoading ? (
+                        <View style={{ alignItems: 'center', paddingVertical: 20 }}>
+                          <ActivityIndicator size="small" color="#2E3192" />
+                          <Text style={{ marginTop: 8, color: '#666' }}>Loading health data...</Text>
+                        </View>
+                      ) : (
+                        <>
+                          <View style={styles.soldierDetailField}>
+                            <Text style={styles.soldierDetailLabel}>{`${i18n.t('heartRateLabel')}:`}</Text>
+                            <Text style={styles.soldierDetailValue}>
+                              {soldierDetailVitals?.heart_rate || i18n.t('notAvailable')}
+                              {soldierDetailVitals?.heart_rate && ' bpm'}
+                            </Text>
+                          </View>
+                          <View style={styles.soldierDetailField}>
+                            <Text style={styles.soldierDetailLabel}>{`${i18n.t('temperatureLabel')}:`}</Text>
+                            <Text style={styles.soldierDetailValue}>
+                              {soldierDetailVitals?.temperature || i18n.t('notAvailable')}
+                              {soldierDetailVitals?.temperature && '°C'}
+                            </Text>
+                          </View>
+                          <View style={styles.soldierDetailField}>
+                            <Text style={styles.soldierDetailLabel}>{`${i18n.t('bloodPressure')}:`}</Text>
+                            <Text style={styles.soldierDetailValue}>
+                              {soldierDetailVitals?.blood_pressure || i18n.t('notAvailable')}
+                              {soldierDetailVitals?.blood_pressure && ' mmHg'}
+                            </Text>
+                          </View>
+                          <View style={styles.soldierDetailField}>
+                            <Text style={styles.soldierDetailLabel}>{`${i18n.t('spo2Label')}:`}</Text>
+                            <Text style={styles.soldierDetailValue}>
+                              {soldierDetailVitals?.spo2 || i18n.t('notAvailable')}
+                              {soldierDetailVitals?.spo2 && '%'}
+                            </Text>
+                          </View>
+                        </>
+                      )}
                     </View>
 
                     {/* Tasks */}
                     <View style={styles.soldierDetailSection}>
                       <View style={styles.soldierDetailHeader}>
                         <Icon name="clipboard-outline" size={24} color="#4CAF50" />
-                        <Text style={styles.soldierDetailSectionTitle}>Assigned Tasks</Text>
+                        <Text style={styles.soldierDetailSectionTitle}>{i18n.t('assignedTasks')}</Text>
                       </View>
-                      {selectedSoldierForDetail.tasks && selectedSoldierForDetail.tasks.length > 0 ? (
-                        selectedSoldierForDetail.tasks.map((task, index) => (
-                          <View key={index} style={styles.soldierDetailTask}>
-                            <Text style={styles.soldierDetailTaskTitle}>{task.title || task.name || `Task ${index + 1}`}</Text>
-                            <Text style={styles.soldierDetailTaskDescription}>{task.description || 'No description'}</Text>
+                      {soldierDetailTasks && soldierDetailTasks.length > 0 ? (
+                        soldierDetailTasks.map((task, index) => (
+                          <View key={task.id || task.assignment_id || index} style={styles.soldierDetailTask}>
+                            <Text style={styles.soldierDetailTaskTitle}>
+                              {task.title || task.assignment_name || task.name || `Assignment ${task.id || index + 1}`}
+                            </Text>
+                            <Text style={styles.soldierDetailTaskDescription}>
+                              {task.description || task.brief_description || i18n.t('noDescription')}
+                            </Text>
+                            {(task.title || task.assignment_name) && (
+                              <Text style={styles.soldierDetailTaskMeta}>
+                                Assignment: {task.title || task.assignment_name}
+                              </Text>
+                            )}
+                            {task.type && (
+                              <Text style={styles.soldierDetailTaskMeta}>
+                                Type: {task.type}
+                              </Text>
+                            )}
+                            {task.priority && (
+                              <Text style={styles.soldierDetailTaskMeta}>
+                                Priority: {task.priority}
+                              </Text>
+                            )}
+                            {task.destination && (
+                              <Text style={styles.soldierDetailTaskMeta}>
+                                Destination: {task.destination}
+                              </Text>
+                            )}
                             <View style={[styles.soldierDetailTaskStatus, { backgroundColor: getTaskStatusColor(task.status) }]}>
-                              <Text style={styles.soldierDetailTaskStatusText}>{task.status || 'Pending'}</Text>
+                              <Text style={styles.soldierDetailTaskStatusText}>{getTaskStatusLabel(task.status)}</Text>
                             </View>
                           </View>
                         ))
                       ) : (
-                        <>
-                          <View style={styles.soldierDetailTask}>
-                            <Text style={styles.soldierDetailTaskTitle}>Patrol Duty</Text>
-                            <Text style={styles.soldierDetailTaskDescription}>Conduct routine patrol in assigned sector</Text>
-                            <View style={[styles.soldierDetailTaskStatus, { backgroundColor: getTaskStatusColor('in_progress') }]}>
-                              <Text style={styles.soldierDetailTaskStatusText}>In Progress</Text>
-                            </View>
-                          </View>
-                          <View style={styles.soldierDetailTask}>
-                            <Text style={styles.soldierDetailTaskTitle}>Equipment Maintenance</Text>
-                            <Text style={styles.soldierDetailTaskDescription}>Check and maintain assigned equipment</Text>
-                            <View style={[styles.soldierDetailTaskStatus, { backgroundColor: getTaskStatusColor('pending') }]}>
-                              <Text style={styles.soldierDetailTaskStatusText}>Pending</Text>
-                            </View>
-                          </View>
-                        </>
+                        <View style={styles.soldierDetailTask}>
+                          <Text style={styles.soldierDetailTaskDescription}>{i18n.t('noTasksAssigned')}</Text>
+                        </View>
                       )}
                     </View>
 
@@ -1989,28 +2242,28 @@ export default function ProfileScreen({ navigation, route }) {
                     <View style={styles.soldierDetailSection}>
                       <View style={styles.soldierDetailHeader}>
                         <Icon name="alert-circle" size={24} color="#FF9800" />
-                        <Text style={styles.soldierDetailSectionTitle}>Recent Alerts</Text>
+                        <Text style={styles.soldierDetailSectionTitle}>{i18n.t('recentAlerts')}</Text>
                       </View>
-                      <View style={styles.soldierDetailAlert}>
-                        <View style={styles.soldierDetailAlertHeader}>
-                          <Text style={styles.soldierDetailAlertTitle}>Zone Breach Alert</Text>
-                          <View style={[styles.soldierDetailAlertSeverity, { backgroundColor: '#F44336' }]}>
-                            <Text style={styles.soldierDetailAlertSeverityText}>HIGH</Text>
+                      {selectedSoldierForDetail.alerts && selectedSoldierForDetail.alerts.length > 0 ? (
+                        selectedSoldierForDetail.alerts.map((alert, index) => (
+                          <View key={index} style={styles.soldierDetailAlert}>
+                            <View style={styles.soldierDetailAlertHeader}>
+                              <Text style={styles.soldierDetailAlertTitle}>{alert.title || i18n.t('recentAlerts')}</Text>
+                              <View style={[styles.soldierDetailAlertSeverity, { backgroundColor: getAlertSeverityColor(alert.severity) }]}>
+                                <Text style={styles.soldierDetailAlertSeverityText}>{getAlertSeverityLabel(alert.severity)}</Text>
+                              </View>
+                            </View>
+                            <Text style={styles.soldierDetailAlertMessage}>{alert.message || i18n.t('noDescription')}</Text>
+                            {alert.relativeTime || alert.time ? (
+                              <Text style={styles.soldierDetailAlertTime}>{alert.relativeTime || alert.time}</Text>
+                            ) : null}
                           </View>
+                        ))
+                      ) : (
+                        <View style={styles.soldierDetailAlert}>
+                          <Text style={styles.soldierDetailAlertMessage}>{i18n.t('noAlerts')}</Text>
                         </View>
-                        <Text style={styles.soldierDetailAlertMessage}>Soldier entered restricted zone at 14:30</Text>
-                        <Text style={styles.soldierDetailAlertTime}>2 hours ago</Text>
-                      </View>
-                      <View style={styles.soldierDetailAlert}>
-                        <View style={styles.soldierDetailAlertHeader}>
-                          <Text style={styles.soldierDetailAlertTitle}>Equipment Check</Text>
-                          <View style={[styles.soldierDetailAlertSeverity, { backgroundColor: '#FF9800' }]}>
-                            <Text style={styles.soldierDetailAlertSeverityText}>MEDIUM</Text>
-                          </View>
-                        </View>
-                        <Text style={styles.soldierDetailAlertMessage}>Scheduled equipment maintenance due</Text>
-                        <Text style={styles.soldierDetailAlertTime}>1 day ago</Text>
-                      </View>
+                      )}
                     </View>
                   </>
                 )}
@@ -2035,14 +2288,15 @@ export default function ProfileScreen({ navigation, route }) {
                   <Icon name="close" size={24} color="#333" />
                 </TouchableOpacity>
               </View>
-              
+
               <View style={styles.editSoldierModalContent}>
                 <View style={styles.editSoldierFormGroup}>
                   <Text style={styles.editSoldierInputLabel}>Full Name *</Text>
-                  <TextInput 
-                    style={styles.editSoldierInput} 
-                    placeholder="Enter full name" 
-                    value={editSoldierForm.name} 
+                  <TextInput
+                    style={styles.editSoldierInput}
+                    placeholder="Enter full name"
+                    placeholderTextColor="#999"
+                    value={editSoldierForm.name}
                     onChangeText={v => setEditSoldierForm({ ...editSoldierForm, name: v })}
                     autoCapitalize="words"
                   />
@@ -2050,10 +2304,11 @@ export default function ProfileScreen({ navigation, route }) {
 
                 <View style={styles.editSoldierFormGroup}>
                   <Text style={styles.editSoldierInputLabel}>Email</Text>
-                  <TextInput 
-                    style={styles.editSoldierInput} 
-                    placeholder="Enter email address" 
-                    value={editSoldierForm.email} 
+                  <TextInput
+                    style={styles.editSoldierInput}
+                    placeholder="Enter email address"
+                    placeholderTextColor="#999"
+                    value={editSoldierForm.email}
                     onChangeText={v => setEditSoldierForm({ ...editSoldierForm, email: v })}
                     keyboardType="email-address"
                     autoCapitalize="none"
@@ -2062,10 +2317,11 @@ export default function ProfileScreen({ navigation, route }) {
 
                 <View style={styles.editSoldierFormGroup}>
                   <Text style={styles.editSoldierInputLabel}>Unit *</Text>
-                  <TextInput 
-                    style={styles.editSoldierInput} 
-                    placeholder="Enter unit" 
-                    value={editSoldierForm.unit} 
+                  <TextInput
+                    style={styles.editSoldierInput}
+                    placeholder="Enter unit"
+                    placeholderTextColor="#999"
+                    value={editSoldierForm.unit}
                     onChangeText={v => setEditSoldierForm({ ...editSoldierForm, unit: v })}
                     autoCapitalize="characters"
                   />
@@ -2073,18 +2329,19 @@ export default function ProfileScreen({ navigation, route }) {
 
                 <View style={styles.editSoldierFormGroup}>
                   <Text style={styles.editSoldierInputLabel}>Mobile Number</Text>
-                  <TextInput 
-                    style={styles.editSoldierInput} 
-                    placeholder="Enter mobile number" 
-                    value={editSoldierForm.MobileNumber} 
+                  <TextInput
+                    style={styles.editSoldierInput}
+                    placeholder="Enter mobile number"
+                    placeholderTextColor="#999"
+                    value={editSoldierForm.MobileNumber}
                     onChangeText={v => setEditSoldierForm({ ...editSoldierForm, MobileNumber: v })}
                     keyboardType="phone-pad"
                   />
                 </View>
 
                 <View style={styles.editSoldierButtonGroup}>
-                  <TouchableOpacity 
-                    style={[styles.editSoldierCancelBtn, { marginRight: 10 }]} 
+                  <TouchableOpacity
+                    style={[styles.editSoldierCancelBtn, { marginRight: 10 }]}
                     onPress={() => {
                       setEditSoldierVisible(false);
                       resetEditSoldierForm();
@@ -2092,9 +2349,9 @@ export default function ProfileScreen({ navigation, route }) {
                   >
                     <Text style={styles.editSoldierCancelBtnText}>Cancel</Text>
                   </TouchableOpacity>
-                  
-                  <TouchableOpacity 
-                    style={[styles.editSoldierSaveBtn, { flex: 1 }]} 
+
+                  <TouchableOpacity
+                    style={[styles.editSoldierSaveBtn, { flex: 1 }]}
                     onPress={saveEditSoldier}
                     disabled={savingSoldier}
                   >
@@ -2103,14 +2360,14 @@ export default function ProfileScreen({ navigation, route }) {
                     ) : (
                       <Text style={styles.editSoldierSaveBtnText}>Save Changes</Text>
                     )}
-                </TouchableOpacity>
+                  </TouchableOpacity>
                 </View>
               </View>
             </View>
           </View>
         </Modal>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -2140,7 +2397,6 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#f5f5f5',
-    paddingTop: Platform.OS === 'ios' ? 50 : StatusBar.currentHeight || 0,
   },
   container: {
     flex: 1,
@@ -2149,26 +2405,95 @@ const styles = StyleSheet.create({
   headerWrapper: {
     // No extra margin needed since SafeAreaView handles it
   },
+  langOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    alignItems: 'flex-end',
+    justifyContent: 'flex-start',
+  },
+  langPopup: {
+    marginTop: 68,
+    marginRight: 12,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 12,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    width: 260,
+  },
+  langTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#333',
+    marginBottom: 10,
+  },
+  langOptionsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  langOptionChip: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginRight: 8,
+    marginBottom: 8,
+    backgroundColor: '#fff',
+  },
+  langOptionChipActive: {
+    backgroundColor: '#2E3192',
+    borderColor: '#2E3192',
+  },
+  langOptionText: {
+    color: '#333',
+    fontWeight: '600',
+    fontSize: 12,
+  },
+  langOptionTextActive: {
+    color: '#fff',
+  },
+  langCloseBtn: {
+    alignSelf: 'flex-end',
+    marginTop: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  langCloseText: {
+    color: '#2E3192',
+    fontWeight: '700',
+  },
   header: {
     backgroundColor: '#fff',
     padding: 20,
-    alignItems: 'center',
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
   },
+  profileHeaderContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 20,
+  },
   profileImageContainer: {
     position: 'relative',
-    marginBottom: 15,
+    marginRight: 20,
   },
   profileImage: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
   },
   profileImagePlaceholder: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: '#2E3192',
     justifyContent: 'center',
     alignItems: 'center',
@@ -2190,13 +2515,19 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
   profileInfo: {
+    flex: 1,
+    alignItems: 'flex-start',
+  },
+  actionButtonsContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
     alignItems: 'center',
-    marginBottom: 15,
   },
   name: {
     fontSize: 20,
     fontWeight: 'bold',
     marginBottom: 5,
+    color: '#2E3192',
   },
   serviceId: {
     color: '#757575',
@@ -2205,10 +2536,13 @@ const styles = StyleSheet.create({
   unitInfo: {
     flexDirection: 'row',
     alignItems: 'center',
+    marginTop: 5,
   },
   unitText: {
     marginLeft: 5,
     color: '#2E3192',
+    fontWeight: '600',
+    fontSize: 16,
   },
   editButton: {
     flexDirection: 'row',
@@ -2217,6 +2551,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 15,
     borderRadius: 20,
+    marginHorizontal: 5,
   },
   editButtonText: {
     color: '#fff',
@@ -2224,14 +2559,79 @@ const styles = StyleSheet.create({
   },
   section: {
     backgroundColor: '#fff',
-    marginTop: 10,
+    marginHorizontal: 15,
+    marginVertical: 8,
+    borderRadius: 8,
     padding: 15,
-    borderRadius: 5,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
   },
   sectionTitle: {
     fontSize: 18,
     fontWeight: 'bold',
     marginBottom: 15,
+    color: '#2E3192',
+  },
+  // Logout modal styles (scoped)
+  logoutModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  logoutModalCard: {
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: '#F3F4F6',
+  },
+  logoutModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#111827',
+    marginBottom: 6,
+  },
+  logoutModalSubtitle: {
+    fontSize: 14,
+    color: '#6B7280',
+    marginBottom: 16,
+  },
+  logoutModalActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+  },
+  logoutModalActionButton: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  logoutModalSecondaryButton: {
+    borderColor: '#E5E7EB',
+    backgroundColor: '#F9FAFB',
+  },
+  logoutModalPrimaryButton: {
+    borderColor: '#0EA5A4',
+    backgroundColor: '#10B981',
+  },
+  logoutModalSecondaryText: {
+    color: '#6B7280',
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  logoutModalPrimaryText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
   quickActionsContainer: {
     flexDirection: 'row',
@@ -2276,23 +2676,34 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 10,
+    paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#f0f0f0',
   },
   infoLabel: {
     fontWeight: 'bold',
+    fontSize: 14,
+    color: '#333',
+    flex: 1,
   },
   infoValue: {
-    fontWeight: 'bold',
+    fontSize: 14,
+    color: '#666',
+    flex: 1,
+    textAlign: 'right',
   },
   infoInput: {
     flex: 1,
     borderWidth: 1,
     borderColor: '#ddd',
     borderRadius: 5,
-    padding: 5,
+    padding: 8,
     fontSize: 14,
+    color: '#333',
+    backgroundColor: '#fff',
+    // Ensure text visibility on all devices
+    includeFontPadding: false,
+    textAlignVertical: 'center',
   },
   tabContainer: {
     flexDirection: 'row',
@@ -2345,12 +2756,17 @@ const styles = StyleSheet.create({
   },
   contentContainer: {
     flex: 1,
+    // Ensure proper scrolling behavior
+    overflow: 'hidden',
   },
   tabContent: {
     flex: 1,
   },
   scrollContainer: {
     paddingBottom: 20, // Add some padding at the bottom for the new section
+    flexGrow: 1,
+    // Ensure proper scrolling on all devices
+    minHeight: '100%',
   },
   notificationItem: {
     flexDirection: 'row',
@@ -2396,10 +2812,12 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    paddingVertical: 20,
   },
   emptyText: {
     color: '#999',
     fontSize: 16,
+    textAlign: 'center',
   },
   reportItem: {
     flexDirection: 'row',
@@ -2430,21 +2848,7 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontWeight: 'bold',
   },
-  changePasswordButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#f0f0f0',
-    padding: 10,
-    borderRadius: 5,
-    marginHorizontal: 15,
-    marginVertical: 10,
-    justifyContent: 'center',
-  },
-  changePasswordText: {
-    color: '#2E3192',
-    fontWeight: 'bold',
-    marginLeft: 10,
-  },
+
   logoutButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2502,20 +2906,18 @@ const styles = StyleSheet.create({
   passwordInput: {
     flex: 1,
     height: 40,
-  },
-  languageSelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#f0f0f0',
-    padding: 10,
+    color: '#333',
+    backgroundColor: '#fff',
+    fontSize: 14,
+    paddingHorizontal: 10,
+    // Ensure text visibility on all devices
+    includeFontPadding: false,
+    textAlignVertical: 'center',
+    borderWidth: 1,
+    borderColor: '#ddd',
     borderRadius: 5,
-    marginHorizontal: 15,
-    marginVertical: 10,
   },
-  languageSelectorText: {
-    flex: 1,
-    marginHorizontal: 10,
-  },
+
   modalItem: {
     padding: 10,
   },
@@ -2761,44 +3163,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  languageModalCard: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 24,
-    width: '80%',
-    alignItems: 'center',
-    elevation: 8,
-  },
-  languageModalTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginBottom: 16,
-    color: '#2E3192',
-  },
-  languageModalItem: {
-    paddingVertical: 12,
-    width: '100%',
-    alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-  },
-  languageModalItemText: {
-    fontSize: 16,
-    color: '#222',
-  },
-  languageModalCancelButton: {
-    marginTop: 16,
-    paddingVertical: 10,
-    width: '100%',
-    alignItems: 'center',
-    backgroundColor: '#f5f5f5',
-    borderRadius: 8,
-  },
-  languageModalCancelText: {
-    fontSize: 16,
-    color: '#F44336',
-    fontWeight: 'bold',
-  },
+
   // Soldiers Report Styles
   soldierReportContainer: {
     flex: 1,
@@ -3261,6 +3626,12 @@ const styles = StyleSheet.create({
     color: '#666',
     marginBottom: 8,
   },
+  soldierDetailTaskMeta: {
+    fontSize: 12,
+    color: '#888',
+    fontStyle: 'italic',
+    marginBottom: 4,
+  },
   soldierDetailTaskStatus: {
     alignSelf: 'flex-start',
     paddingHorizontal: 8,
@@ -3316,5 +3687,54 @@ const styles = StyleSheet.create({
   soldierDetailAlertTime: {
     fontSize: 11,
     color: '#999',
+  },
+  // Coming Soon styles
+  comingSoonContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 40,
+    paddingVertical: 60,
+  },
+  comingSoonIcon: {
+    marginBottom: 24,
+    opacity: 0.8,
+  },
+  comingSoonTitle: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    color: '#2E3192',
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  comingSoonDescription: {
+    fontSize: 16,
+    color: '#666',
+    textAlign: 'center',
+    lineHeight: 24,
+    marginBottom: 32,
+    opacity: 0.8,
+  },
+  comingSoonFeatures: {
+    alignSelf: 'stretch',
+    backgroundColor: 'rgba(46, 49, 146, 0.05)',
+    borderRadius: 12,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(46, 49, 146, 0.1)',
+  },
+  comingSoonFeaturesTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#2E3192',
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  comingSoonFeature: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 8,
+    lineHeight: 20,
+    opacity: 0.8,
   },
 }); 

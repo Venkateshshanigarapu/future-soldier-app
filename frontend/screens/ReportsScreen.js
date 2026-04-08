@@ -1,23 +1,37 @@
 import React, { useState, useLayoutEffect, useEffect, useCallback, useRef, useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, SafeAreaView, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, SafeAreaView, RefreshControl, TextInput } from 'react-native';
 import { Card } from 'react-native-paper';
 import Icon from 'react-native-vector-icons/Ionicons';
-import MenuIcon from './MenuIcon';
+// Removed legacy header menu; global drawer handles header actions
 import FilterChip from '../components/FilterChip';
-import i18n from '../utils/i18n';
+import i18n, { addLanguageChangeListener } from '../utils/i18n';
 import { apiService } from '../services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { green } from '../theme';
+import assignmentService from '../services/assignmentService';
 
 export default function ReportsScreen({ navigation }) {
-  const [dropdownVisible, setDropdownVisible] = useState(false);
-  const [reports, setReports] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  // ReportsScreen function.
+  // Top of component, right after
   const [isCommander, setIsCommander] = useState(false);
-  const [currentUnit, setCurrentUnit] = useState(null);
+  const [currentLanguage, setCurrentLanguage] = useState(i18n.locale);
+  // Place all useState:
+  const [reports, setReports] = useState([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
+  const [dataLoaded, setDataLoaded] = useState(false);
   
+  // Listen for language changes to force re-render
+  useEffect(() => {
+    const unsubscribe = addLanguageChangeListener(() => {
+      setCurrentLanguage(i18n.locale);
+    });
+    return unsubscribe;
+  }, []);
+  // Remove any duplicates of these states later in file.
+  // All other state, refs, useEffects, callbacks, memoizations, and render functions as normally structured.
+  // No use of 'refreshing' before it is declared.
+
   // Use refs to prevent unnecessary re-renders
   const isCommanderRef = useRef(false);
   const currentUnitRef = useRef(null);
@@ -32,22 +46,32 @@ export default function ReportsScreen({ navigation }) {
   const [unitChangeReports, setUnitChangeReports] = useState([]);
 
   useEffect(() => {
-    // Determine role and unit
     (async () => {
+      setLoading(true);
       try {
+        // Get user info
         const userStr = await AsyncStorage.getItem('currentUser');
-        if (userStr) {
+        if (!userStr) return;
           const user = JSON.parse(userStr);
-          const role = String(user?.role || '').trim().toLowerCase();
-          const isComm = role === 'commander';
-          setIsCommander(isComm);
-          setCurrentUnit(user?.unit || null);
-          
-          // Update refs
-          isCommanderRef.current = isComm;
-          currentUnitRef.current = user?.unit || null;
-        }
-      } catch {}
+        setCurrentUser(user);
+
+        // Fetch commander of this unit
+        const users = await apiService.getAllUsers();
+        const unit = user.unit || '';
+        const commander = (users || []).find(
+          u => String(u.role || '').toLowerCase() === 'commander' && u.unit === unit
+        );
+        setCommanderName(commander?.name || commander?.username || '');
+
+        // Fetch assignments for this soldier (by unit)
+        const asg = await assignmentService.getAssignments({ unitId: user.unit });
+        setAssignments(asg || []);
+
+        if (user && user.role && String(user.role).toLowerCase() === 'commander') setIsCommander(true);
+        else setIsCommander(false);
+
+      } catch (e) {}
+      setLoading(false);
     })();
   }, []);
 
@@ -77,10 +101,26 @@ export default function ReportsScreen({ navigation }) {
       try {
         if (selectedCategoryRef.current === 'soldier') {
           const allUsers = await apiService.getAllUsers();
-          const data = (allUsers || []).filter(u =>
-            String(u.role || '').trim().toLowerCase() === 'soldier'
-          );
-          setSoldierReports(data);
+          const normalizeBool = (v) => (typeof v === 'boolean' ? v : String(v || '').toLowerCase() === 'true');
+          const ONLINE_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+          const computeIsOnline = (u) => {
+            if (typeof u.isOnline === 'boolean') return u.isOnline;
+            const status = String(u.status || '').toLowerCase();
+            if (status === 'active') return true;
+            const lastActiveStr = u.last_active || u.lastActive || u.updated_at || u.updatedAt || null;
+            const lastActive = lastActiveStr ? new Date(lastActiveStr).getTime() : 0;
+            if (lastActive && (Date.now() - lastActive) < ONLINE_WINDOW_MS) return true;
+            // if GPS fields exist recently, consider online (backend may update lat/lng)
+            return false;
+          };
+          const data = (allUsers || [])
+            .filter(u => String(u.role || '').trim().toLowerCase() === 'soldier')
+            .map(u => ({ ...u, isOnline: computeIsOnline(u) }));
+          const commanderUnit = currentUser && currentUser.unit ? String(currentUser.unit).trim().toLowerCase() : '';
+          const filtered = commanderUnit
+            ? data.filter(u => String(u.unit || '').trim().toLowerCase() === commanderUnit)
+            : data;
+          setSoldierReports(filtered);
         } else if (selectedCategoryRef.current === 'operation') {
           // Use history entries from reports API as operation report
           const data = (reports || []).filter(r => String(r.type || '').toLowerCase() === 'history');
@@ -107,7 +147,7 @@ export default function ReportsScreen({ navigation }) {
     if (isCommanderRef.current && selectedCategoryRef.current && currentUnitRef.current !== undefined) {
       loadCategory();
     }
-  }, [selectedCategory, currentUnit, isCommander]); // Removed 'reports' dependency
+  }, [selectedCategory, isCommander, currentUser]); // Removed 'reports' dependency
 
   // Update refs when state changes
   useEffect(() => {
@@ -115,8 +155,8 @@ export default function ReportsScreen({ navigation }) {
   }, [isCommander]);
 
   useEffect(() => {
-    currentUnitRef.current = currentUnit;
-  }, [currentUnit]);
+    currentUnitRef.current = currentUser?.unit;
+  }, [currentUser?.unit]);
 
   useEffect(() => {
     selectedCategoryRef.current = selectedCategory;
@@ -131,10 +171,23 @@ export default function ReportsScreen({ navigation }) {
     try {
       if (selectedCategoryRef.current === 'soldier') {
         const allUsers = await apiService.getAllUsers();
-        const data = (allUsers || []).filter(u =>
-          String(u.role || '').trim().toLowerCase() === 'soldier'
-        );
-        setSoldierReports(data);
+        const ONLINE_WINDOW_MS = 5 * 60 * 1000;
+        const computeIsOnline = (u) => {
+          if (typeof u.isOnline === 'boolean') return u.isOnline;
+          const status = String(u.status || '').toLowerCase();
+          if (status === 'active') return true;
+          const lastActiveStr = u.last_active || u.lastActive || u.updated_at || u.updatedAt || null;
+          const lastActive = lastActiveStr ? new Date(lastActiveStr).getTime() : 0;
+          return lastActive && (Date.now() - lastActive) < ONLINE_WINDOW_MS;
+        };
+        const data = (allUsers || [])
+          .filter(u => String(u.role || '').trim().toLowerCase() === 'soldier')
+          .map(u => ({ ...u, isOnline: computeIsOnline(u) }));
+        const commanderUnit = currentUser && currentUser.unit ? String(currentUser.unit).trim().toLowerCase() : '';
+        const filtered = commanderUnit
+          ? data.filter(u => String(u.unit || '').trim().toLowerCase() === commanderUnit)
+          : data;
+        setSoldierReports(filtered);
       } else if (selectedCategoryRef.current === 'operation') {
         const data = (reports || []).filter(r => String(r.type || '').toLowerCase() === 'history');
         setOperationReports(data);
@@ -150,7 +203,7 @@ export default function ReportsScreen({ navigation }) {
     } finally {
       setRefreshing(false);
     }
-  }, []); // Empty dependency array since we use refs
+  }, [currentUser]); // Empty dependency array since we use refs
 
   // Memoize the refresh control to prevent re-renders
   const refreshControl = useMemo(() => (
@@ -161,15 +214,7 @@ export default function ReportsScreen({ navigation }) {
   const assetStatusData = React.useMemo(() => reports.filter(r => r.type === 'status'), [reports]);
   const historyData = React.useMemo(() => reports.filter(r => r.type === 'history'), [reports]);
 
-  const toggleDropdown = () => {
-    setDropdownVisible(prev => !prev);
-  };
-
-  useLayoutEffect(() => {
-    navigation.setOptions({
-      headerRight: undefined
-    });
-  }, [navigation]);
+  // Use global headerRight from TabNavigator; do not override here
 
   const getStatusColor = (status) => {
     switch (status.toLowerCase()) {
@@ -247,212 +292,120 @@ export default function ReportsScreen({ navigation }) {
     </View>
   );
 
-  if (isCommander) {
-    return (
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.container}>
-          {/* Commander top-level filters */}
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterBar} contentContainerStyle={styles.filterBarContent}>
-            <FilterChip 
-              label="Soldier Report" 
-              isActive={selectedCategory === 'soldier'} 
-              onPress={() => setSelectedCategory('soldier')} 
-              icon="people" 
-            />
-            <FilterChip 
-              label="Operation Report" 
-              isActive={selectedCategory === 'operation'} 
-              onPress={() => setSelectedCategory('operation')} 
-              icon="construct" 
-            />
-            <FilterChip 
-              label="Ammo & Equipment" 
-              isActive={selectedCategory === 'ammo'} 
-              onPress={() => setSelectedCategory('ammo')} 
-              icon="cube" 
-            />
-            <FilterChip 
-              label="Alerts & Incidents" 
-              isActive={selectedCategory === 'alerts'} 
-              onPress={() => setSelectedCategory('alerts')} 
-              icon="alert-circle" 
-            />
-            <FilterChip 
-              label="Unit Change Requests" 
-              isActive={selectedCategory === 'unitChange'} 
-              onPress={() => setSelectedCategory('unitChange')} 
-              icon="swap-horizontal" 
-            />
-          </ScrollView>
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [assignments, setAssignments] = useState([]);
+  const [commanderName, setCommanderName] = useState('');
+  const [currentUser, setCurrentUser] = useState(null);
 
-          {loading ? (
-            <View style={styles.listContainer}>
-              <Text style={styles.loadingText}>{i18n.t('loading') || 'Loading...'}</Text>
-            </View>
-          ) : error ? (
-            <View style={styles.listContainer}>
-              <Text style={styles.errorText}>{error}</Text>
-            </View>
-          ) : selectedCategory === 'soldier' ? (
-            <FlatList
-              data={soldierReports}
-              keyExtractor={item => item.id?.toString() || item.username || Math.random().toString()}
-              contentContainerStyle={styles.listContainer}
-              renderItem={({ item }) => (
-                <Card style={styles.statusCard}>
-                  <Card.Content>
-                    <View style={styles.soldierRow}>
-                      <View style={styles.soldierInfo}>
-                        <Text style={styles.soldierName}>{item.name || item.username || 'Unknown Soldier'}</Text>
-                        <Text style={styles.soldierId}>ID: {item.username || item.id || 'N/A'}</Text>
-                        <Text style={styles.soldierUnit}>Unit: {item.unit || 'N/A'}</Text>
-                        <Text style={styles.soldierRank}>Rank: {item.rank || 'N/A'}</Text>
-                      </View>
-                      <View style={styles.soldierStatusContainer}>
-                        <View style={[styles.soldierStatusBadge, { backgroundColor: item.isOnline ? green.accent : '#F44336' }]}>
-                          <Text style={styles.soldierStatusText}>
-                            {item.isOnline ? 'Online' : 'Offline'}
-                          </Text>
-                        </View>
-                      </View>
-                    </View>
-                  </Card.Content>
-                </Card>
-              )}
-              ListEmptyComponent={
-                <View style={styles.emptyContainer}>
-                  <Icon name="people-outline" size={48} color={green.dark} />
-                  <Text style={styles.emptyText}>No soldiers found.</Text>
-                </View>
-              }
-              refreshControl={refreshControl}
-            />
-          ) : selectedCategory === 'operation' ? (
-            <FlatList
-              data={operationReports}
-              keyExtractor={item => item.id?.toString() || Math.random().toString()}
-              contentContainerStyle={styles.listContainer}
-              renderItem={({ item }) => (
-                <View style={styles.historyItem}>
-                  <View style={styles.historyIconContainer}>
-                    <Icon name="time" size={24} color={green.primary} />
-                  </View>
-                  <View style={styles.historyContent}>
-                    <Text style={styles.historyEvent}>{item.event || 'Operation Event'}</Text>
-                    <Text style={styles.historyDetails}>{item.details || item.description || 'No details available'}</Text>
-                    <Text style={styles.historyTimestamp}>{item.timestamp || item.lastUpdate || 'Timestamp unavailable'}</Text>
-                  </View>
-                </View>
-              )}
-              ListEmptyComponent={
-                <View style={styles.emptyContainer}>
-                  <Icon name="construct-outline" size={48} color={green.dark} />
-                  <Text style={styles.emptyText}>No operation reports.</Text>
-                </View>
-              }
-              refreshControl={refreshControl}
-            />
-          ) : selectedCategory === 'ammo' ? (
-            <FlatList
-              data={ammoReports}
-              keyExtractor={item => item.id?.toString() || Math.random().toString()}
-              contentContainerStyle={styles.listContainer}
-              renderItem={renderAssetStatusItem}
-              ListEmptyComponent={
-                <View style={styles.emptyContainer}>
-                  <Icon name="cube-outline" size={48} color={green.dark} />
-                  <Text style={styles.emptyText}>No ammo/equipment reports.</Text>
-                </View>
-              }
-              refreshControl={refreshControl}
-            />
-          ) : selectedCategory === 'alerts' ? (
-            <FlatList
-              data={alertsReports}
-              keyExtractor={item => item.id?.toString() || Math.random().toString()}
-              contentContainerStyle={styles.listContainer}
-              renderItem={({ item }) => (
-                <Card style={styles.statusCard}>
-                  <Card.Content>
-                    <View style={styles.alertRow}>
-                      <Icon name="alert-circle" size={24} color="#F44336" style={styles.alertIcon} />
-                      <View style={styles.alertContent}>
-                        <Text style={styles.alertCategory}>{item.category || 'Alert'}</Text>
-                        <Text style={styles.alertMessage}>{item.message || 'No message available'}</Text>
-                        <Text style={styles.alertTimestamp}>{item.created_at || 'Timestamp unavailable'}</Text>
-                        <View style={[styles.alertSeverityBadge, { backgroundColor: getSeverityColor(item.severity) }]}>
-                          <Text style={styles.alertSeverityText}>
-                            {item.severity || 'Unknown'} Severity
-                          </Text>
-                        </View>
-                      </View>
-                    </View>
-                  </Card.Content>
-                </Card>
-              )}
-              ListEmptyComponent={
-                <View style={styles.emptyContainer}>
-                  <Icon name="alert-circle-outline" size={48} color={green.dark} />
-                  <Text style={styles.emptyText}>No alerts.</Text>
-                </View>
-              }
-              refreshControl={refreshControl}
-            />
-          ) : (
-            <View style={styles.listContainer}>
-              <View style={styles.emptyContainer}>
-                <Icon name="swap-horizontal-outline" size={48} color={green.dark} />
-                <Text style={styles.emptyText}>No unit change requests.</Text>
-              </View>
-            </View>
-          )}
-        </View>
+  const fetchData = async () => {
+    setLoading(true);
+    setError(null);
+    setDataLoaded(false);
+    try {
+      // Get user info
+      const userStr = await AsyncStorage.getItem('currentUser');
+      if (!userStr) throw new Error('No user logged in');
+      const user = JSON.parse(userStr);
+      setCurrentUser(user);
+
+      // Fetch commander
+      const users = await apiService.getAllUsers();
+      const unit = user && user.unit ? user.unit : '';
+      // Robust commander lookup
+      const commander = (users && unit) ? users.find(
+        u => String(u.role || '').toLowerCase() === 'commander' && u.unit === unit
+      ) : null;
+      setCommanderName((commander && (commander.name || commander.username)) || 'N/A');
+
+      // Fetch assignments (by unit)
+      const asg = user && user.unit ? await assignmentService.getAssignments({ unitId: user.unit }) : [];
+      setAssignments(Array.isArray(asg) ? asg : []);
+      setDataLoaded(true);
+    } catch (err) {
+      setError(i18n.t('reportLoadError'));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchData(); }, []);
+
+  if (loading) {
+    return (
+      <SafeAreaView style={{flex:1,justifyContent:'center',alignItems:'center',backgroundColor:green.background}}>
+        <Text style={{fontSize:18,color:green.primary}}>{i18n.t('loading')}</Text>
       </SafeAreaView>
     );
   }
-
-  // Default (non-commander) view
+  if (error) {
+    return (
+      <SafeAreaView style={{flex:1,justifyContent:'center',alignItems:'center',backgroundColor:green.background}}>
+        <Text style={{fontSize:16,color:'#f44336',marginBottom:16}}>{error}</Text>
+        <TouchableOpacity style={{paddingHorizontal:20,paddingVertical:10,backgroundColor:green.primary,borderRadius:7}} onPress={fetchData}>
+          <Text style={{color:'#fff',fontWeight:'bold'}}>{i18n.t('retry')}</Text>
+        </TouchableOpacity>
+      </SafeAreaView>
+    );
+  }
+  if (!currentUser) {
+    return (
+      <SafeAreaView style={{flex:1,justifyContent:'center',alignItems:'center',backgroundColor:green.background}}>
+        <Text style={{fontSize:18,color:green.primary}}>{i18n.t('loading')}</Text>
+      </SafeAreaView>
+    );
+  }
+  const completedAssignments = assignments.filter(a => String(a.status).toLowerCase() === 'completed');
+  const pendingAssignments = assignments.filter(a => String(a.status).toLowerCase() === 'pending');
+  const filteredCompleted = completedAssignments.filter(a => (a.title||'').toLowerCase().includes(search.toLowerCase()) || (a.description||'').toLowerCase().includes(search.toLowerCase()));
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
-        <View style={styles.tabContainer}>
-          <TouchableOpacity
-            style={[styles.tab, styles.activeTab]}
-          >
-            <Icon 
-              name="pulse" 
-              size={20} 
-              color={green.primary} 
-            />
-            <Text style={[styles.tabText, styles.activeTabText]}>
-                {i18n.t('status')}
-            </Text>
-          </TouchableOpacity>
-        </View>
-        {loading ? (
-          <View style={styles.listContainer}>
-            <Text style={styles.loadingText}>{i18n.t('loading') || 'Loading...'}</Text>
+    <SafeAreaView style={{flex:1, backgroundColor: green.background}}>
+      <ScrollView style={{flex:1}} contentContainerStyle={{padding: 16}}>
+        {/* Soldier Info */}
+        <View style={{backgroundColor:'#fff', borderRadius:12, padding:16, marginBottom:20, shadowColor:'#000', shadowOpacity:0.04, shadowRadius:5, elevation:2}}>
+          <Text style={{fontSize:20,fontWeight:'bold',color:green.dark}}>{currentUser.name || i18n.t('notAvailable')}</Text>
+          <Text style={{fontSize:14,color:green.primary,marginTop:2}}>{`${i18n.t('unit')}: ${currentUser.unit || i18n.t('notAvailable')}`}</Text>
+          <Text style={{fontSize:14,color:'#607D8B',marginTop:2}}>{`${i18n.t('commander')}: ${commanderName || i18n.t('notAvailable')}`}</Text>
+            </View>
+        {/* Stats Row */}
+        <View style={{flexDirection:'row',justifyContent:'space-between',marginBottom:16}}>
+          <View style={{flex:1,marginRight:8,backgroundColor:'#e8f5e9',borderRadius:8,padding:16,alignItems:'center'}}>
+            <Text style={{fontSize:16,fontWeight:'bold',color:green.primary}}>{i18n.t('completed')}</Text>
+            <Text style={{fontSize:24,fontWeight:'bold',color:green.primary}}>{completedAssignments.length}</Text>
           </View>
-        ) : error ? (
-          <View style={styles.listContainer}>
-            <Text style={styles.errorText}>{error}</Text>
+          <View style={{flex:1,marginLeft:8,backgroundColor:'#fffde7',borderRadius:8,padding:16,alignItems:'center'}}>
+            <Text style={{fontSize:16,fontWeight:'bold',color:'#fbc02d'}}>{i18n.t('pending')}</Text>
+            <Text style={{fontSize:24,fontWeight:'bold',color:'#fbc02d'}}>{pendingAssignments.length}</Text>
           </View>
-        ) : (
-          <FlatList
-            data={assetStatusData}
-            renderItem={renderAssetStatusItem}
-            keyExtractor={item => item.id?.toString() || Math.random().toString()}
-            contentContainerStyle={styles.listContainer}
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Icon name="document-outline" size={48} color={green.dark} />
-                <Text style={styles.emptyText}>{i18n.t('noReports')}</Text>
-              </View>
-            }
-            refreshControl={refreshControl}
+            </View>
+        {/* Search Bar */}
+        <View style={{marginBottom:10}}>
+          <TextInput
+            placeholder={i18n.t('searchCompletedAssignments')}
+            style={{backgroundColor:'#f5f5f5',borderRadius:8,paddingVertical:8,paddingHorizontal:14,fontSize:16}}
+            value={search}
+            onChangeText={setSearch}
           />
-        )}
-      </View>
+          </View>
+        {/* Completed Assignment List */}
+        {filteredCompleted.length === 0 ? (
+          <View style={{alignItems:'center',marginTop:32}}><Text style={{color:green.dark}}>{i18n.t('noCompletedAssignments')}</Text></View>
+        ) : filteredCompleted.map(asg => (
+          <TouchableOpacity
+            key={asg.id}
+            onPress={() => navigation.navigate('AssignmentDetail', { assignment: asg })}
+            activeOpacity={0.82}
+            style={{backgroundColor:'#fff',borderRadius:10,padding:16,marginBottom:12,shadowColor:'#000',shadowOpacity:0.04,shadowRadius:5,elevation:1}}
+          >
+            <View style={{flexDirection:'row',alignItems:'center',marginBottom:8}}>
+              <Icon name="clipboard-outline" size={20} color={green.primary} style={{marginRight:10}} />
+              <Text style={{fontSize:18,fontWeight:'bold',color:green.primary,flex:1}} numberOfLines={1}>{asg.title}</Text>
+            </View>
+            <Text numberOfLines={2} style={{color:'#666',fontSize:14,marginBottom:6}}>{asg.description}</Text>
+            <Text style={{color:green.accent,fontSize:13}}>{asg.due_date ? `${i18n.t('duePrefix')} ${new Date(asg.due_date).toLocaleDateString()}` : ''}</Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -468,13 +421,17 @@ const styles = StyleSheet.create({
   },
   filterBar: {
     backgroundColor: '#fff',
-    paddingVertical: 8,
+    height: 56,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
     elevation: 2,
   },
   filterBarContent: {
     paddingHorizontal: 10,
+    minHeight: 56,
+    alignItems: 'center',
+    paddingVertical: 0,
+    justifyContent: 'center',
   },
   tabContainer: {
     flexDirection: 'row',
@@ -510,7 +467,9 @@ const styles = StyleSheet.create({
     textShadowRadius: 1,
   },
   listContainer: {
-    padding: 10,
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 0,
   },
   statusCard: {
     marginBottom: 10,
@@ -648,7 +607,9 @@ const styles = StyleSheet.create({
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 40,
+    paddingVertical: 20,
+    paddingHorizontal: 10,
+    marginTop: 10,
   },
   emptyText: {
     fontSize: 16,
@@ -687,15 +648,7 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 1,
   },
-  soldierRank: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: green.dark,
-    marginBottom: 2,
-    textShadowColor: 'rgba(0, 0, 0, 0.05)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 1,
-  },
+  // soldierRank style removed
   soldierStatusContainer: {
     alignItems: 'flex-end',
   },
@@ -763,10 +716,60 @@ const styles = StyleSheet.create({
   soldierRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
   },
   soldierInfo: {
     flex: 1,
+    paddingRight: 12,
+  },
+  // Coming Soon styles
+  comingSoonContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 40,
+    paddingVertical: 60,
+  },
+  comingSoonIcon: {
+    marginBottom: 24,
+    opacity: 0.8,
+  },
+  comingSoonTitle: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    color: green.primary,
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  comingSoonDescription: {
+    fontSize: 16,
+    color: green.dark,
+    textAlign: 'center',
+    lineHeight: 24,
+    marginBottom: 32,
+    opacity: 0.8,
+  },
+  comingSoonFeatures: {
+    alignSelf: 'stretch',
+    backgroundColor: 'rgba(46, 49, 146, 0.05)',
+    borderRadius: 12,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(46, 49, 146, 0.1)',
+  },
+  comingSoonFeaturesTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: green.primary,
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  comingSoonFeature: {
+    fontSize: 14,
+    color: green.dark,
+    marginBottom: 8,
+    lineHeight: 20,
+    opacity: 0.8,
   },
 }); 
 

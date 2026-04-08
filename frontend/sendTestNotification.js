@@ -2,9 +2,35 @@ import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import i18n from './utils/i18n';
 
+const DEDUP_STORAGE_KEY = 'last_local_notif_shown_map';
+const DEDUP_WINDOW_MS = 60000; // 60 seconds
+
+async function shouldShowLocalNotification(key) {
+  try {
+    const now = Date.now();
+    const raw = await AsyncStorage.getItem(DEDUP_STORAGE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    const last = map[key] || 0;
+    if (now - last < DEDUP_WINDOW_MS) {
+      console.log('⚠️ Duplicate notification ignored');
+      return false;
+    }
+    map[key] = now;
+    await AsyncStorage.setItem(DEDUP_STORAGE_KEY, JSON.stringify(map));
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 // Function to send a local test notification
 export const sendLocalNotification = async (title, body, data = {}) => {
   try {
+    // De-duplicate to avoid loops from foreground listeners
+    const key = `${title || ''}|${body || ''}|${data?.type || ''}`;
+    const allowed = await shouldShowLocalNotification(key);
+    if (!allowed) return false;
+
     await Notifications.scheduleNotificationAsync({
       content: {
         title: title || i18n.t('testNotification'),
@@ -18,7 +44,7 @@ export const sendLocalNotification = async (title, body, data = {}) => {
       trigger: { seconds: 1 },
     });
     
-    console.log('Local notification scheduled');
+    console.log('📱 Local notification scheduled:', title || i18n.t('testNotification'));
     return true;
   } catch (error) {
     console.error('Error sending local notification:', error);

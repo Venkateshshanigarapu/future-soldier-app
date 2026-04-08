@@ -1,11 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet, Alert, SafeAreaView } from 'react-native';
 import Icon from 'react-native-vector-icons/Ionicons';
-import i18n from '../utils/i18n';
+import i18n, { addLanguageChangeListener } from '../utils/i18n';
 
 export default function PasswordRecoveryScreen({ navigation }) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [currentLanguage, setCurrentLanguage] = useState(i18n.locale);
+  
+  // Listen for language changes to force re-render
+  useEffect(() => {
+    const unsubscribe = addLanguageChangeListener(() => {
+      setCurrentLanguage(i18n.locale);
+    });
+    return unsubscribe;
+  }, []);
 
   const handleSendOTP = () => {
     if (!input.trim()) {

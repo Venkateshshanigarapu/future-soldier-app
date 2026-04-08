@@ -2,21 +2,44 @@ import React, { useRef, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Animated } from 'react-native';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { formatDistanceToNow } from 'date-fns';
+import i18n from '../utils/i18n';
+import { enUS, hi, ta as taLocale } from 'date-fns/locale';
 
-const NotificationItem = ({ 
-  notification, 
-  onPress, 
+const getDateFnsLocale = () => {
+  const language = (i18n.locale || 'en').split('-')[0];
+  switch (language) {
+    case 'hi':
+      return hi;
+    case 'ta':
+      return taLocale;
+    default:
+      return enUS;
+  }
+};
+
+const getSeverityLabel = (severity) => {
+  const normalized = (severity || '').toLowerCase();
+  const key = `notificationSeverityLabels.${normalized}`;
+  const translation = i18n.t(key);
+  return translation === key ? (severity ? severity.toUpperCase() : '') : translation;
+};
+
+const NotificationItem = ({
+  notification,
+  onPress,
+  onDelete,
   index = 0,
-  style 
+  style
 }) => {
   const slideAnim = useRef(new Animated.Value(50)).current;
   const opacityAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.95)).current;
+  const dateLocale = getDateFnsLocale();
 
   useEffect(() => {
     // Staggered animation for list items
     const delay = index * 100;
-    
+
     Animated.parallel([
       Animated.timing(slideAnim, {
         toValue: 0,
@@ -110,15 +133,15 @@ const NotificationItem = ({
   const formatTimestamp = (timestamp) => {
     try {
       const date = new Date(timestamp);
-      return formatDistanceToNow(date, { addSuffix: true });
+      return formatDistanceToNow(date, { addSuffix: true, locale: dateLocale });
     } catch (e) {
-      return 'Unknown time';
+      return i18n.t('unknownTime');
     }
   };
 
   const getPriorityIndicator = (priority) => {
     if (!priority || priority === 'normal') return null;
-    
+
     const priorityColors = {
       low: '#10B981',
       high: '#F59E0B',
@@ -153,25 +176,25 @@ const NotificationItem = ({
       >
         {/* Priority Indicator */}
         {getPriorityIndicator(notification.priority)}
-        
+
         {/* Icon Container */}
-        <View 
+        <View
           style={[
-            styles.iconContainer, 
+            styles.iconContainer,
             { backgroundColor: getStatusColor(notification.type) + '20' }
           ]}
         >
-          <Icon 
-            name={getIconName(notification.type)} 
-            size={20} 
-            color={getStatusColor(notification.type)} 
+          <Icon
+            name={getIconName(notification.type)}
+            size={20}
+            color={getStatusColor(notification.type)}
           />
         </View>
-        
+
         {/* Text Content */}
         <View style={styles.textContainer}>
           <View style={styles.titleRow}>
-            <Text 
+            <Text
               style={[
                 styles.title,
                 !notification.read && styles.unreadTitle
@@ -182,14 +205,14 @@ const NotificationItem = ({
             </Text>
             {!notification.read && <View style={styles.unreadDot} />}
           </View>
-          
-          <Text 
-            style={styles.message} 
+
+          <Text
+            style={styles.message}
             numberOfLines={2}
           >
             {notification.message}
           </Text>
-          
+
           <View style={styles.metaRow}>
             <Text style={styles.timestamp}>
               {formatTimestamp(notification.timestamp)}
@@ -197,7 +220,7 @@ const NotificationItem = ({
             {notification.source === 'alert' && notification.severity ? (
               <View style={styles.categoryTag}>
                 <Text style={styles.categoryText}>
-                  {String(notification.severity).toUpperCase()}
+                  {getSeverityLabel(notification.severity)}
                 </Text>
               </View>
             ) : notification.category ? (
@@ -207,12 +230,21 @@ const NotificationItem = ({
             ) : null}
           </View>
         </View>
-        
+
+        {/* Delete Button */}
+        <TouchableOpacity
+          style={styles.deleteButton}
+          onPress={() => onDelete && onDelete(notification.id)}
+          activeOpacity={0.7}
+        >
+          <Icon name="trash-outline" size={18} color="#EF4444" />
+        </TouchableOpacity>
+
         {/* Chevron */}
-        <Icon 
-          name="chevron-forward" 
-          size={16} 
-          color="#9CA3AF" 
+        <Icon
+          name="chevron-forward"
+          size={16}
+          color="#9CA3AF"
           style={styles.chevron}
         />
       </TouchableOpacity>
@@ -312,6 +344,15 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   chevron: {
+    marginLeft: 8,
+  },
+  deleteButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#FEF2F2',
+    justifyContent: 'center',
+    alignItems: 'center',
     marginLeft: 8,
   },
 });

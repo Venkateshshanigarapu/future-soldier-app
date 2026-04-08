@@ -77,7 +77,7 @@ npm start
 **Look for in console:**
 ```
 Firebase Admin SDK initialized successfully
-Server running on http://localhost:3001
+Server running on http://117.251.19.107:3001
 ```
 
 ---
@@ -86,7 +86,7 @@ Server running on http://localhost:3001
 
 ### 1. Test Backend Connection
 ```bash
-curl http://localhost:3001/api/ping
+curl http://117.251.19.107:3001/api/ping
 ```
 
 **Expected response:**
@@ -96,7 +96,7 @@ curl http://localhost:3001/api/ping
 
 ### 2. Test Database Connection
 ```bash
-curl http://localhost:3001/api/dbtest
+curl http://117.251.19.107:3001/api/dbtest
 ```
 
 **Expected response:**
@@ -106,7 +106,7 @@ curl http://localhost:3001/api/dbtest
 
 ### 3. Send Test Notification
 ```bash
-curl -X POST http://localhost:3001/api/notifications \
+curl -X POST http://117.251.19.107:3001/api/notifications \
   -H "Content-Type: application/json" \
   -d '{
     "userId": 1,

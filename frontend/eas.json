@@ -8,7 +8,10 @@
       "developmentClient": true,
       "distribution": "internal",
       "android": {
-        "gradleCommand": ":app:assembleDebug"
+        "gradleCommand": ":app:assembleDebug",
+        "env": {
+          "EXPO_USE_GRADLE_VERSION_CATALOG": "1"
+        }
       }
     },
     "preview": {
@@ -16,7 +19,8 @@
         "buildType": "apk",
         "gradleCommand": ":app:assembleRelease",
         "env": {
-          "EXPO_PUBLIC_API_BASE_URL": "https://ocfa.onrender.com/api"
+          "EXPO_PUBLIC_API_BASE_URL": "http://117.251.19.107/api",
+          "EXPO_USE_GRADLE_VERSION_CATALOG": "1"
         }
       }
     },
@@ -25,7 +29,8 @@
         "buildType": "app-bundle",
         "gradleCommand": ":app:bundleRelease",
         "env": {
-          "EXPO_PUBLIC_API_BASE_URL": "https://ocfa.onrender.com/api"
+          "EXPO_PUBLIC_API_BASE_URL": "https://ocfa.onrender.com/api",
+          "EXPO_USE_GRADLE_VERSION_CATALOG": "1"
         }
       }
     }

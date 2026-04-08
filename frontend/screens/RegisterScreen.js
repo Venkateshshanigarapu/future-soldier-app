@@ -1,5 +1,6 @@
 // screens/RegisterScreen.js
 import React, { useState, useRef } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import { View, TextInput, StyleSheet, Text, Image, TouchableOpacity, ActivityIndicator, ScrollView, Alert, Modal, FlatList, SafeAreaView, KeyboardAvoidingView, Dimensions, Platform, Keyboard, TouchableWithoutFeedback } from 'react-native';
 import { apiService, API_BASE_URL, socket } from '../services/api';
 import Icon from 'react-native-vector-icons/Ionicons';
@@ -7,16 +8,10 @@ import * as Location from 'expo-location';
 
 const { width, height } = Dimensions.get('window');
 
-const unitOptions = [
-  'Delta Squad',
-  'Neemustest1',
-  'Unit Bengaluru',
-  'Unit Chennai',
-  'Unit Delhi',
-  'Unit Kolkata',
-  'Unit Mumbai',
-];
-const genderOptions = ['Male', 'Female', 'Others'];
+// Loaded from backend `/units`
+const initialUnitOptions = [];
+const genderOptions = ['Male', 'Female', 'Transgender'];
+const bloodGroupOptions = ['A+', 'A-', 'B+', 'B-', 'O+', 'O-', 'AB+', 'AB-'];
 const roleOptions = ['commander', 'soldier'];
 
 export default function RegisterScreen({ navigation }) {
@@ -37,7 +32,9 @@ export default function RegisterScreen({ navigation }) {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [unitOptions, setUnitOptions] = useState(initialUnitOptions);
   const [showGenderModal, setShowGenderModal] = useState(false);
+  const [showBloodGroupModal, setShowBloodGroupModal] = useState(false);
   const [showUnitModal, setShowUnitModal] = useState(false);
   const [showRoleModal, setShowRoleModal] = useState(false);
   const [secureTextEntry, setSecureTextEntry] = useState(true);
@@ -55,6 +52,39 @@ export default function RegisterScreen({ navigation }) {
       socket.off('connect');
     };
   }, []);
+
+  // Load units from backend (reusable)
+  const loadUnits = React.useCallback(async () => {
+    try {
+      const units = await apiService.getUnits?.();
+      if (Array.isArray(units) && units.length > 0) {
+        const names = units
+          .map(u => (typeof u === 'string' ? u : (u.name || u.unit_name || u.unit || '')))
+          .filter(Boolean);
+        setUnitOptions(Array.from(new Set(names)).sort());
+        return;
+      }
+    } catch {}
+
+    // Fallbacks when /units unavailable or empty
+    try {
+      const users = await apiService.getAllUsers?.();
+      const names = Array.from(new Set((users || [])
+        .map(u => (u?.unit || u?.unit_name || '').toString().trim())
+        .filter(Boolean)));
+      setUnitOptions(names.sort());
+    } catch {
+      setUnitOptions([]);
+    }
+  }, []);
+
+  // Initial load
+  React.useEffect(() => { loadUnits(); }, [loadUnits]);
+
+  // Refresh when screen comes into focus
+  useFocusEffect(React.useCallback(() => {
+    loadUnits();
+  }, [loadUnits]));
 
   const validatePassword = (password) => {
     // Check minimum length
@@ -105,6 +135,15 @@ export default function RegisterScreen({ navigation }) {
           delete errors[fieldName];
         }
         break;
+      case 'idNumber':
+        if (value && value.trim() === '') {
+          errors[fieldName] = 'ID Number is required';
+        } else if (value && value.trim().length < 3) {
+          errors[fieldName] = 'ID Number must be at least 3 characters long';
+        } else {
+          delete errors[fieldName];
+        }
+        break;
       case 'password':
         const passwordError = validatePassword(value);
         if (passwordError) {
@@ -131,7 +170,7 @@ export default function RegisterScreen({ navigation }) {
   };
 
   const getProgressPercentage = () => {
-    const mandatoryFields = [name, phone, email, category, unit, role, username, password, confirmPassword];
+    const mandatoryFields = [name, phone, email, idNumber, category, unit, role, username, password, confirmPassword];
     const filledFields = mandatoryFields.filter(field => field && field.trim() !== '').length;
     return Math.round((filledFields / mandatoryFields.length) * 100);
   };
@@ -142,6 +181,7 @@ export default function RegisterScreen({ navigation }) {
       { field: name, name: 'Full Name' },
       { field: phone, name: 'Phone Number' },
       { field: email, name: 'Email' },
+      { field: idNumber, name: 'ID Number' },
       { field: category, name: 'Category/Division' },
       { field: unit, name: 'Unit' },
       { field: role, name: 'Role' },
@@ -166,7 +206,7 @@ export default function RegisterScreen({ navigation }) {
     setLoading(true);
     console.log('Sending registration data:', {
       username, password, name, role, email, unit_name: unit,
-      category, phone_no: phone, id_no: idNumber
+      category, phone_no: phone, id_no: idNumber, age, gender, height, weight, bp, blood_group: bloodGroup
     });
     try {
       const newUser = {
@@ -178,11 +218,17 @@ export default function RegisterScreen({ navigation }) {
         unit_name: unit,
         category,
         phone_no: phone ? String(phone) : '',
-        id_no: idNumber ? String(idNumber) : ''
+        id_no: idNumber ? String(idNumber) : '',
+        age: age ? parseInt(age) : null,
+        gender: gender || null,
+        height: height || null,
+        weight: weight || null,
+        bp: bp || null,
+        blood_group: bloodGroup || null
       };
       const data = await apiService.register(newUser);
       setLoading(false);
-      Alert.alert('Registration successful!', 'You can now log in.', [
+      Alert.alert('Registration Request Submitted!', 'Your registration request has been submitted for approval. You will be notified once it is processed.', [
         { text: 'OK', onPress: () => navigation.navigate('Login') },
       ]);
     } catch (err) {
@@ -366,12 +412,11 @@ export default function RegisterScreen({ navigation }) {
                   'Enter your age',
                   { keyboardType: 'numeric', fieldName: 'age' }
                 )}
-                {renderField(
+                {renderDropdownField(
                   'Blood Group',
                   bloodGroup,
-                  setBloodGroup,
-                  'e.g., A+, B-, O+',
-                  { fieldName: 'bloodGroup' }
+                  () => setShowBloodGroupModal(true),
+                  'Select Blood Group'
                 )}
               </View>
               {/* Medical Information Section */}
@@ -409,11 +454,11 @@ export default function RegisterScreen({ navigation }) {
                   <Text style={styles.sectionTitle}>Military Information</Text>
                 </View>
                 {renderField(
-                  'ID Number',
+                  'Employee ID',
                   idNumber,
                   setIdNumber,
                   'Enter your employee ID',
-                  { fieldName: 'idNumber' }
+                  { fieldName: 'idNumber', isRequired: true }
                 )}
                 {renderField(
                   'Category/Division',
@@ -425,7 +470,7 @@ export default function RegisterScreen({ navigation }) {
                 {renderDropdownField(
                   'Unit',
                   unit,
-                  () => setShowUnitModal(true),
+                  async () => { await loadUnits(); setShowUnitModal(true); },
                   'Select Unit',
                   true
                 )}
@@ -534,7 +579,7 @@ export default function RegisterScreen({ navigation }) {
             <View style={styles.securityNotice}>
               <Icon name="shield-checkmark" size={16} color="#666" />
               <Text style={styles.securityText}>
-                This is a secure military application. All activities are logged and monitored.
+                VERSION 1.0
               </Text>
             </View>
           </View>
@@ -568,6 +613,37 @@ export default function RegisterScreen({ navigation }) {
               activeOpacity={0.7}
             >
                 <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={showBloodGroupModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Select Blood Group</Text>
+            <FlatList
+              data={bloodGroupOptions}
+              keyExtractor={item => item}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.modalItem}
+                  onPress={() => {
+                    setBloodGroup(item);
+                    setShowBloodGroupModal(false);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.modalItemText}>{item}</Text>
+                </TouchableOpacity>
+              )}
+            />
+            <TouchableOpacity 
+              style={styles.modalCancelButton} 
+              onPress={() => setShowBloodGroupModal(false)} 
+              activeOpacity={0.7}
+            >
+              <Text style={styles.modalCancelText}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>

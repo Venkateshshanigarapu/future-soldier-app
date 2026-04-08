@@ -9,7 +9,8 @@ import {
   SafeAreaView,
   StatusBar,
   Animated,
-  Dimensions
+  Dimensions,
+  Modal
 } from 'react-native';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { formatDistanceToNow } from 'date-fns';
@@ -23,6 +24,7 @@ export default function AssignmentDetailScreen({ route, navigation }) {
   const [currentAssignment, setCurrentAssignment] = useState(assignment);
   const [loading, setLoading] = useState(false);
   const [userRole, setUserRole] = useState('');
+  const [statusModalVisible, setStatusModalVisible] = useState(false);
   
   // Animation values
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -57,6 +59,24 @@ export default function AssignmentDetailScreen({ route, navigation }) {
     };
     loadRole();
   }, []);
+
+  useEffect(() => {
+    async function fetchLatestAssignment() {
+      if (!assignment?.id) return;
+      try {
+        setLoading(true);
+        const fresh = await assignmentService.getAssignmentById(assignment.id);
+        setCurrentAssignment(fresh);
+      } catch (e) {
+        // fallback to prop assignment
+        setCurrentAssignment(assignment);
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchLatestAssignment();
+    // eslint-disable-next-line
+  }, [assignment]);
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -136,23 +156,7 @@ export default function AssignmentDetailScreen({ route, navigation }) {
   };
 
   const showStatusOptions = () => {
-    const statusOptions = [
-      { value: 'pending', label: 'Pending', icon: 'time' },
-      { value: 'in_progress', label: 'In Progress', icon: 'play' },
-      { value: 'completed', label: 'Completed', icon: 'checkmark-circle' },
-      { value: 'cancelled', label: 'Cancelled', icon: 'close-circle' },
-    ];
-
-    Alert.alert(
-      'Update Status',
-      'Select new status:',
-      statusOptions.map(option => ({
-        text: option.label,
-        onPress: () => handleStatusChange(option.value),
-      })).concat([
-        { text: 'Cancel', style: 'cancel' }
-      ])
-    );
+    setStatusModalVisible(true);
   };
 
   const isOverdue = currentAssignment.due_date && 
@@ -265,15 +269,57 @@ export default function AssignmentDetailScreen({ route, navigation }) {
             </View>
           </View>
 
-          <View style={styles.detailRow}>
-            <View style={styles.detailItem}>
-              <Icon name="person-circle" size={16} color="#6B7280" />
-              <Text style={styles.detailLabel}>Assigned By:</Text>
-              <Text style={styles.detailValue}>
-                {currentAssignment.assigned_by_username || 'Unknown'}
-              </Text>
+          {/* Assigned By (Commander name from DB) */}
+          {currentAssignment.assigned_commander && (
+            <View style={styles.detailRow}>
+              <View style={styles.detailItem}>
+                <Icon name="person-circle-sharp" size={16} color="#3B82F6" />
+                <Text style={styles.detailLabel}>Assigned By:</Text>
+                <Text style={styles.detailValue}>{currentAssignment.assigned_commander}</Text>
+              </View>
             </View>
-          </View>
+          )}
+
+          {/* Terrain */}
+          {currentAssignment.terrain && (
+            <View style={styles.detailRow}>
+              <View style={styles.detailItem}>
+                <Icon name="earth" size={16} color="#6B7280" />
+                <Text style={styles.detailLabel}>Terrain:</Text>
+                <Text style={styles.detailValue}>{currentAssignment.terrain}</Text>
+              </View>
+            </View>
+          )}
+          {/* Timeframe */}
+          {currentAssignment.timeframe && (
+            <View style={styles.detailRow}>
+              <View style={styles.detailItem}>
+                <Icon name="time" size={16} color="#6B7280" />
+                <Text style={styles.detailLabel}>Timeframe:</Text>
+                <Text style={styles.detailValue}>{currentAssignment.timeframe}</Text>
+              </View>
+            </View>
+          )}
+          {/* Destination */}
+          {currentAssignment.destination && (
+            <View style={styles.detailRow}>
+              <View style={styles.detailItem}>
+                <Icon name="navigate" size={16} color="#6B7280" />
+                <Text style={styles.detailLabel}>Destination:</Text>
+                <Text style={styles.detailValue}>{currentAssignment.destination}</Text>
+              </View>
+            </View>
+          )}
+          {/* Pickup Point */}
+          {currentAssignment.pickup_point && (
+            <View style={styles.detailRow}>
+              <View style={styles.detailItem}>
+                <Icon name="pin" size={16} color="#6B7280" />
+                <Text style={styles.detailLabel}>Pickup Point:</Text>
+                <Text style={styles.detailValue}>{currentAssignment.pickup_point}</Text>
+              </View>
+            </View>
+          )}
 
           {currentAssignment.due_date && (
             <View style={styles.detailRow}>
@@ -358,6 +404,49 @@ export default function AssignmentDetailScreen({ route, navigation }) {
           </View>
         </View>
       </Animated.ScrollView>
+      {/* Status Picker Modal */}
+      <Modal
+        visible={statusModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setStatusModalVisible(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Update Status</Text>
+            <Text style={styles.modalSubtitle}>Select new status:</Text>
+
+            {[
+              { value: 'completed', label: 'Completed', icon: 'checkmark-circle' },
+              { value: 'in_progress', label: 'In Progress', icon: 'play' },
+              { value: 'pending', label: 'Pending', icon: 'time' },
+            ].map((opt) => (
+              <TouchableOpacity
+                key={opt.value}
+                style={[styles.modalOption]}
+                activeOpacity={0.75}
+                onPress={async () => {
+                  setStatusModalVisible(false);
+                  await handleStatusChange(opt.value);
+                }}
+              >
+                <Icon name={opt.icon} size={18} color={getStatusColor(opt.value)} />
+                <Text style={[styles.modalOptionText, { color: getStatusColor(opt.value) }]}>
+                  {opt.label.toUpperCase()}
+                </Text>
+              </TouchableOpacity>
+            ))}
+
+            <TouchableOpacity
+              style={styles.modalCancel}
+              activeOpacity={0.8}
+              onPress={() => setStatusModalVisible(false)}
+            >
+              <Text style={styles.modalCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -541,5 +630,64 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#F3F4F6',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    width: '100%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: '#F3F4F6',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#111827',
+    marginBottom: 6,
+  },
+  modalSubtitle: {
+    fontSize: 14,
+    color: '#6B7280',
+    marginBottom: 12,
+  },
+  modalOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 6,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#F3F4F6',
+    backgroundColor: '#FAFAFA',
+    marginBottom: 10,
+    gap: 10,
+  },
+  modalOptionText: {
+    fontSize: 14,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  modalCancel: {
+    marginTop: 6,
+    alignSelf: 'flex-end',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  modalCancelText: {
+    fontSize: 14,
+    color: '#6B7280',
+    fontWeight: '600',
   },
 });

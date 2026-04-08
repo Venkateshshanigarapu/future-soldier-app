@@ -2,6 +2,20 @@ import React, { useRef, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Animated } from 'react-native';
 import Icon from 'react-native-vector-icons/Ionicons';
 import { formatDistanceToNow } from 'date-fns';
+import i18n from '../utils/i18n';
+import { enUS, hi, ta as taLocale } from 'date-fns/locale';
+
+const getDateFnsLocale = () => {
+  const language = (i18n.locale || 'en').split('-')[0];
+  switch (language) {
+    case 'hi':
+      return hi;
+    case 'ta':
+      return taLocale;
+    default:
+      return enUS;
+  }
+};
 
 const AssignmentItem = ({ 
   assignment, 
@@ -13,6 +27,41 @@ const AssignmentItem = ({
   const slideAnim = useRef(new Animated.Value(50)).current;
   const opacityAnim = useRef(new Animated.Value(0)).current;
   const scaleAnim = useRef(new Animated.Value(0.95)).current;
+  const dateLocale = getDateFnsLocale();
+
+  const getPriorityLabel = (priority) => {
+    const normalized = (priority || '').toLowerCase();
+    switch (normalized) {
+      case 'urgent':
+        return i18n.t('assignmentPriority.urgent');
+      case 'high':
+        return i18n.t('assignmentPriority.high');
+      case 'medium':
+        return i18n.t('assignmentPriority.medium');
+      case 'low':
+        return i18n.t('assignmentPriority.low');
+      default:
+        return priority || '-';
+    }
+  };
+
+  const getStatusLabel = (status) => {
+    const normalized = (status || '').toLowerCase();
+    switch (normalized) {
+      case 'pending':
+        return i18n.t('pending');
+      case 'in_progress':
+      case 'in-progress':
+      case 'in progress':
+        return i18n.t('inProgress');
+      case 'completed':
+        return i18n.t('completed');
+      case 'cancelled':
+        return i18n.t('cancelled');
+      default:
+        return status || '-';
+    }
+  };
 
   useEffect(() => {
     // Staggered animation for list items
@@ -57,7 +106,7 @@ const AssignmentItem = ({
   };
 
   const getPriorityColor = (priority) => {
-    switch (priority) {
+    switch ((priority || '').toLowerCase()) {
       case 'urgent':
         return '#EF4444';
       case 'high':
@@ -72,7 +121,7 @@ const AssignmentItem = ({
   };
 
   const getPriorityIcon = (priority) => {
-    switch (priority) {
+    switch ((priority || '').toLowerCase()) {
       case 'urgent':
         return 'flash';
       case 'high':
@@ -87,7 +136,7 @@ const AssignmentItem = ({
   };
 
   const getStatusIcon = (status) => {
-    switch (status) {
+    switch ((status || '').toLowerCase()) {
       case 'pending':
         return 'time';
       case 'in_progress':
@@ -105,14 +154,13 @@ const AssignmentItem = ({
     if (!dueDate) return null;
     try {
       const date = new Date(dueDate);
-      return formatDistanceToNow(date, { addSuffix: true });
+      return formatDistanceToNow(date, { addSuffix: true, locale: dateLocale });
     } catch (e) {
-      return 'Invalid date';
+      return i18n.t('invalidDate');
     }
   };
 
   const isOverdue = assignment.due_date && new Date(assignment.due_date) < new Date() && assignment.status !== 'completed';
-  const daysUntilDue = assignment.due_date ? Math.ceil((new Date(assignment.due_date) - new Date()) / (1000 * 60 * 60 * 24)) : null;
 
   return (
     <Animated.View
@@ -149,13 +197,13 @@ const AssignmentItem = ({
                 <View style={[styles.priorityBadge, { backgroundColor: getPriorityColor(assignment.priority) + '20' }]}>
                   <Icon name={getPriorityIcon(assignment.priority)} size={12} color={getPriorityColor(assignment.priority)} />
                   <Text style={[styles.badgeText, { color: getPriorityColor(assignment.priority) }]}>
-                    {assignment.priority}
+                    {getPriorityLabel(assignment.priority)}
                   </Text>
                 </View>
                 <View style={[styles.statusBadge, { backgroundColor: getStatusColor(assignment.status) + '20' }]}>
                   <Icon name={getStatusIcon(assignment.status)} size={12} color={getStatusColor(assignment.status)} />
                   <Text style={[styles.badgeText, { color: getStatusColor(assignment.status) }]}>
-                    {assignment.status.replace('_', ' ')}
+                    {getStatusLabel(assignment.status)}
                   </Text>
                 </View>
               </View>
@@ -187,7 +235,7 @@ const AssignmentItem = ({
               <View style={styles.metaItem}>
                 <Icon name="calendar" size={14} color="#6B7280" />
                 <Text style={[styles.metaText, isOverdue && styles.overdueText]}>
-                  {isOverdue ? 'Overdue' : formatDueDate(assignment.due_date)}
+                  {isOverdue ? i18n.t('overdue') : formatDueDate(assignment.due_date)}
                 </Text>
                 {isOverdue && (
                   <View style={styles.overdueDot} />
@@ -209,7 +257,7 @@ const AssignmentItem = ({
             <View style={styles.metaItem}>
               <Icon name="time" size={14} color="#6B7280" />
               <Text style={styles.metaText}>
-                {formatDistanceToNow(new Date(assignment.created_at), { addSuffix: true })}
+                {formatDistanceToNow(new Date(assignment.created_at), { addSuffix: true, locale: dateLocale })}
               </Text>
             </View>
           </View>
@@ -220,7 +268,7 @@ const AssignmentItem = ({
               <View style={styles.progressBar}>
                 <View style={[styles.progressFill, { width: '60%' }]} />
               </View>
-              <Text style={styles.progressText}>In Progress</Text>
+              <Text style={styles.progressText}>{i18n.t('inProgress')}</Text>
             </View>
           )}
         </View>
